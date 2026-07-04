@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -25,6 +26,7 @@ const (
 	screenExecution
 	screenFinished
 	screenError
+	screenValidating
 )
 
 // Styles
@@ -299,7 +301,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentStepIdx++
 					m.feedbackInput.Blur()
 					if m.currentStepIdx >= len(m.steps) {
-						m.state = screenFinished
+						return m.startValidation()
 					}
 					return m, nil
 				case "ctrl+r":
@@ -453,6 +455,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 			return m, nil
 		}
+
+		if m.state == screenValidating {
+			reviewOutput := msg.plan
+			if strings.Contains(strings.ToUpper(reviewOutput), "VALID") && !strings.Contains(reviewOutput, "=== STEP ===") {
+				// The changes are valid! Go to finished screen
+				m.state = screenFinished
+				return m, nil
+			}
+
+			// Try to parse correction steps
+			steps, err := ParseBlueprint(reviewOutput)
+			if err != nil || len(steps) == 0 {
+				m.state = screenFinished
+				return m, nil
+			}
+
+			// Adjust indices to be consecutive with existing steps
+			startIdx := len(m.steps) + 1
+			for i := range steps {
+				steps[i].Index = startIdx + i
+				steps[i].Status = StatePending
+			}
+
+			// Append new correction steps to m.steps
+			m.steps = append(m.steps, steps...)
+
+			// Set the active step index to the first new correction step
+			m.currentStepIdx = startIdx - 1
+			m.state = screenExecution
+			m.autoExecute = false // Let user review and run the corrections
+			m.statusMsg = ""
+			
+			// Refresh viewport content
+			wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
+			m.viewport.SetContent(wrapped)
+
+			return m, nil
+		}
+
 		m.rawPlan = msg.plan
 		steps, err := ParseBlueprint(m.rawPlan)
 		if err != nil {
@@ -486,7 +527,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentStepIdx++
 
 			if m.currentStepIdx >= len(m.steps) {
-				m.state = screenFinished
+				return m.startValidation()
 			} else if m.autoExecute {
 				// Immediately execute next step
 				nextStep := &m.steps[m.currentStepIdx]
@@ -552,7 +593,7 @@ func (m Model) View() string {
 		s.WriteString(m.promptInput.View())
 		s.WriteString("\n\n" + helpStyle.Render("[Enter] Submit prompt to AGY for planning  |  Type /exit to quit"))
 
-	case screenPlanning:
+	case screenPlanning, screenValidating:
 		s.WriteString(fmt.Sprintf("%s %s\n\n", m.spinner.View(), m.statusMsg))
 		
 		// Header = 9 lines (art + spacing)
@@ -772,6 +813,66 @@ func (m Model) listenAGYProgressCmd() tea.Cmd {
 			return agyCompletedMsg(res)
 		}
 	}
+}
+
+func (m Model) startValidation() (Model, tea.Cmd) {
+	m.state = screenValidating
+	m.streamingLog = ""
+	m.statusMsg = "Running cloud code review validation on implemented changes..."
+	m.agyRunner = newAGYRunner()
+
+	go func() {
+		// 1. Get git diff
+		diffCmd := exec.Command("git", "diff")
+		diffCmd.Dir = m.cwd
+		diffOut, err := diffCmd.CombinedOutput()
+		if err != nil {
+			// If git fails, fallback to finished
+			m.agyRunner.result <- agyResult{plan: "VALID", err: nil}
+			return
+		}
+
+		diffStr := string(diffOut)
+		if strings.TrimSpace(diffStr) == "" {
+			// No changes made? Return VALID
+			m.agyRunner.result <- agyResult{plan: "VALID", err: nil}
+			return
+		}
+
+		// 2. Build review prompt
+		reviewPrompt := fmt.Sprintf(`You are the Senior Code Reviewer.
+The junior developer (local model) has implemented the requested task. Here is the git diff of the modifications made in the workspace:
+---
+%s
+---
+
+Please review this diff for any syntax errors, compile errors, accidental deletions, naming mismatches, or incorrect modifications.
+- If everything is correct and complete, output ONLY the word "VALID" (with no other text).
+- If there are errors, output one or more correction steps formatted EXACTLY as follows:
+=== STEP ===
+Type: modify
+Path: [relative path to the file]
+Description: [brief description of the fix]
+
+TargetBlock:
+%s
+[Specify the EXACT block of lines to look for in the file so the worker knows where to edit.]
+%s
+
+Instructions:
+%s
+[Provide the exact instructions or replacement block to fix the bug.]
+%s
+=== END ===
+
+Do not execute any commands or write files yourself. Return ONLY "VALID" or the correction steps in the format above.`, diffStr, "```", "```", "```", "```")
+
+		// 3. Run AGY to review
+		reviewOut, runErr := RunAGY(m.cwd, reviewPrompt, true, m.agyRunner.progress)
+		m.agyRunner.result <- agyResult{plan: reviewOut, err: runErr}
+	}()
+
+	return m, m.listenAGYProgressCmd()
 }
 
 func (m Model) startStepExecution(step *Step) (Model, tea.Cmd) {

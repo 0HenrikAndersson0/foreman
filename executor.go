@@ -75,9 +75,18 @@ func executeModify(cwd string, model string, step *Step, progressChan chan strin
 
 	var prompt string
 	if useBlockReplacement {
+		markedContent := strings.Replace(currentContent, targetBlock, fmt.Sprintf("<<<<<<< ORIGINAL BLOCK (DO NOT EDIT OUTSIDE THIS BLOCK)\n%s\n=======\n[THE NEW CODE FOR THIS BLOCK WILL BE RENDERED HERE ACCORDING TO THE INSTRUCTIONS BELOW]\n>>>>>>>", targetBlock), 1)
+
 		if step.Feedback != "" {
 			prompt = fmt.Sprintf(`You are a developer rewriting a specific block of code inside a file to fix a previous attempt.
-Your task is to modify the target block of code according to these instructions:
+We have marked the target block to replace using <<<<<<< and >>>>>>> markers in the file below.
+
+Here is the entire file for context:
+---
+%s
+---
+
+Your task is to rewrite the ORIGINAL BLOCK of code inside the markers to satisfy these instructions:
 ---
 Instructions:
 %s
@@ -85,27 +94,28 @@ Instructions:
 User Correction Feedback:
 %s
 ---
-Target Block of Code to Replace:
+
+You MUST output ONLY the new replacement code block that goes between the markers. Do NOT output any other parts of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the original block.
+You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
+				markedContent, step.Instructions, step.Feedback, "```", "```")
+		} else {
+			prompt = fmt.Sprintf(`You are a developer rewriting a specific block of code inside a file.
+We have marked the target block to replace using <<<<<<< and >>>>>>> markers in the file below.
+
+Here is the entire file for context:
+---
 %s
 ---
 
-You MUST output ONLY the new replacement code block that should replace the Target Block of Code. Do NOT output the rest of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the target block.
-You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				step.Instructions, step.Feedback, targetBlock, "```", "```")
-		} else {
-			prompt = fmt.Sprintf(`You are a developer rewriting a specific block of code inside a file.
-Your task is to modify the target block of code according to these instructions:
+Your task is to rewrite the ORIGINAL BLOCK of code inside the markers to satisfy these instructions:
 ---
 Instructions:
 %s
 ---
-Target Block of Code to Replace:
-%s
----
 
-You MUST output ONLY the new replacement code block that should replace the Target Block of Code. Do NOT output the rest of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the target block.
+You MUST output ONLY the new replacement code block that goes between the markers. Do NOT output any other parts of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the original block.
 You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				step.Instructions, targetBlock, "```", "```")
+				markedContent, step.Instructions, "```", "```")
 		}
 	} else {
 		if step.Feedback != "" {
@@ -176,7 +186,9 @@ You MUST output the final code inside a single markdown code block starting with
 
 	var finalContent string
 	if useBlockReplacement {
-		finalContent = strings.Replace(currentContent, targetBlock, updatedContent, 1)
+		// Clean the replacement of any markers the model might have output
+		cleanReplacement := cleanReplacementContent(updatedContent)
+		finalContent = strings.Replace(currentContent, targetBlock, cleanReplacement, 1)
 	} else {
 		finalContent = updatedContent
 	}
@@ -266,4 +278,22 @@ func executeCommand(cwd string, step *Step, progressChan chan string) error {
 	progressChan <- "\nCommand completed successfully.\n"
 	step.Status = StateSuccess
 	return nil
+}
+
+// cleanReplacementContent filters out any formatting markers a model might have returned
+func cleanReplacementContent(content string) string {
+	lines := strings.Split(content, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "<<<<<<<") || 
+		   strings.HasPrefix(trimmed, "=======") || 
+		   strings.HasPrefix(trimmed, ">>>>>>>") ||
+		   strings.Contains(trimmed, "ORIGINAL BLOCK") ||
+		   strings.Contains(trimmed, "NEW CODE FOR THIS BLOCK") {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	return strings.Join(cleaned, "\n")
 }
