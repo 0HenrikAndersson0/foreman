@@ -334,9 +334,16 @@ The junior developer (local model) has implemented the requested task. Here is t
 %s
 ---
 
-Please review this diff for any syntax errors, compile errors, accidental deletions, naming mismatches, or incorrect modifications.
-- If everything is correct and complete, output ONLY the word "VALID" (with no other text).
-- If there are errors, output one or more correction steps formatted EXACTLY as follows:
+Your primary goal is to verify that:
+1. The changes are strictly related to implementing the requested task and that the project builds/compiles correctly.
+2. No required code, imports, or helper functions were accidentally removed or truncated.
+
+CRITICAL RULES:
+- Ignore any stylistic refactoring, code cleaning, formatting, or optional improvements. Do NOT output correction steps for style, cleanups, or refactorings that do not affect compilation or task correctness.
+- Only generate correction steps if there is a compile/syntax error, missing necessary logic, or if essential code was accidentally deleted.
+- If the changes are functional, correct, and do not break compilation (even if they could be cleaner), output ONLY the word "VALID" (with no other text).
+
+If there are critical errors or missing needed code, output one or more correction steps formatted EXACTLY as follows:
 === STEP ===
 Type: modify
 Path: [relative path to the file]
