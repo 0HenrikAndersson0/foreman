@@ -52,15 +52,40 @@ func BuildInitialPlanningPrompt(userRequest string) string {
 %s`, userRequest, GetBlueprintRulesPrompt())
 }
 
-// RunAGY executes the AGY CLI to generate or refine the plan, streaming stdout/stderr chunks to progressChan.
-func RunAGY(cwd string, prompt string, isContinue bool, progressChan chan string) (string, error) {
-	args := []string{}
-	if isContinue {
-		args = append(args, "--continue")
-	}
-	args = append(args, "--print", prompt)
+// RunCloudAgent executes the selected cloud agent CLI to generate or refine the plan, streaming stdout/stderr chunks to progressChan.
+func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, progressChan chan string) (string, error) {
+	var cmdName string
+	var args []string
 
-	cmd := exec.Command(agyPath, args...)
+	providerClean := strings.ToLower(provider)
+	if strings.Contains(providerClean, "agy") {
+		cmdName = agyPath
+		if isContinue {
+			args = append(args, "--continue")
+		}
+		args = append(args, "--print", prompt)
+	} else if strings.Contains(providerClean, "claude") {
+		cmdName = "claude"
+		_, pathErr := exec.LookPath("claude")
+		if pathErr != nil {
+			cmdName = "npx"
+			args = []string{"-y", "@anthropic-ai/claude-code", "--non-interactive"}
+		} else {
+			args = []string{"--non-interactive"}
+		}
+		args = append(args, prompt)
+	} else if strings.Contains(providerClean, "copilot") {
+		cmdName = "gh"
+		args = []string{"copilot", "suggest", "-t", "shell", prompt}
+	} else {
+		cmdName = agyPath
+		if isContinue {
+			args = append(args, "--continue")
+		}
+		args = append(args, "--print", prompt)
+	}
+
+	cmd := exec.Command(cmdName, args...)
 	cmd.Dir = cwd
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -73,12 +98,10 @@ func RunAGY(cwd string, prompt string, isContinue bool, progressChan chan string
 	}
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start AGY CLI: %w", err)
+		return "", fmt.Errorf("failed to start cloud agent CLI (%s): %w", cmdName, err)
 	}
 
 	var stdoutBuf bytes.Buffer
-
-	// Read stdout and stderr concurrently
 	doneChan := make(chan struct{}, 2)
 
 	go func() {
@@ -112,7 +135,6 @@ func RunAGY(cwd string, prompt string, isContinue bool, progressChan chan string
 		doneChan <- struct{}{}
 	}()
 
-	// Wait for readers to finish and close channel
 	go func() {
 		<-doneChan
 		<-doneChan
@@ -121,7 +143,7 @@ func RunAGY(cwd string, prompt string, isContinue bool, progressChan chan string
 
 	err = cmd.Wait()
 	if err != nil {
-		return "", fmt.Errorf("AGY CLI execution failed: %w", err)
+		return "", fmt.Errorf("cloud agent CLI execution failed: %w", err)
 	}
 
 	return stdoutBuf.String(), nil

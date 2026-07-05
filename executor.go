@@ -10,7 +10,7 @@ import (
 )
 
 // ExecuteStep runs a single step in the blueprint, streaming output to progressChan.
-func ExecuteStep(cwd string, model string, step *Step, progressChan chan string) error {
+func ExecuteStep(cwd string, cloudAgent string, model string, step *Step, progressChan chan string) error {
 	step.Status = StateRunning
 	defer close(progressChan)
 
@@ -21,7 +21,7 @@ func ExecuteStep(cwd string, model string, step *Step, progressChan chan string)
 		return executeModify(cwd, model, step, progressChan)
 	case StepCommand:
 		if step.Command == "foreman-code-review" {
-			return executeForemanCodeReview(cwd, step, progressChan)
+			return executeForemanCodeReview(cwd, cloudAgent, step, progressChan)
 		}
 		if step.Command == "foreman-build-lint-test" {
 			return executeForemanBuildLintTest(cwd, step, progressChan)
@@ -305,8 +305,8 @@ func cleanReplacementContent(content string) string {
 	return strings.Join(cleaned, "\n")
 }
 
-func executeForemanCodeReview(cwd string, step *Step, progressChan chan string) error {
-	progressChan <- "Running cloud code review validation on implemented changes...\n"
+func executeForemanCodeReview(cwd string, cloudAgent string, step *Step, progressChan chan string) error {
+	progressChan <- fmt.Sprintf("Running cloud code review validation using %s...\n", cloudAgent)
 	
 	// 1. Get git diff
 	diffCmd := exec.Command("git", "diff")
@@ -325,7 +325,7 @@ func executeForemanCodeReview(cwd string, step *Step, progressChan chan string) 
 		return nil
 	}
 
-	progressChan <- "Sending git diff to AGY for review...\n\n"
+	progressChan <- fmt.Sprintf("Sending git diff to %s for review...\n\n", cloudAgent)
 
 	// 2. Build review prompt
 	reviewPrompt := fmt.Sprintf(`You are the Senior Code Reviewer.
@@ -355,8 +355,8 @@ Instructions:
 
 Do not execute any commands or write files yourself. Return ONLY "VALID" or the correction steps in the format above.`, diffStr, "```", "```", "```", "```")
 
-	// 3. Run AGY to review
-	reviewOut, runErr := RunAGY(cwd, reviewPrompt, true, progressChan)
+	// 3. Run Cloud Agent to review
+	reviewOut, runErr := RunCloudAgent(cloudAgent, cwd, reviewPrompt, true, progressChan)
 	if runErr != nil {
 		step.Status = StateError
 		step.ErrorMsg = fmt.Sprintf("Cloud review execution failed: %s", runErr.Error())
