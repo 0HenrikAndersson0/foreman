@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -26,7 +25,7 @@ const (
 	screenExecution
 	screenFinished
 	screenError
-	screenValidating
+	screenSessionPrompt
 )
 
 // Styles
@@ -149,12 +148,14 @@ type Model struct {
 	executionLog   string
 
 	// Execution tracking
-	currentStepIdx int
-	autoExecute    bool
-	isExecuting    bool
-	statusMsg      string
-	terminalWidth  int
-	terminalHeight int
+	currentStepIdx        int
+	autoExecute           bool
+	isExecuting           bool
+	statusMsg             string
+	terminalWidth         int
+	terminalHeight        int
+	continueSession       bool
+	selectedSessionOption int // 0: continue, 1: new
 }
 
 func InitialModel(cwd string) Model {
@@ -257,7 +258,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 				if strings.TrimSpace(prompt) != "" {
-					m, cmd = m.startPlanning(prompt, false)
+					m, cmd = m.startPlanning(prompt, m.continueSession, false)
 					return m, cmd
 				}
 			}
@@ -278,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if strings.TrimSpace(feedback) != "" {
 					m.feedbackInput.SetValue("")
-					m, cmd = m.startPlanning(feedback, true)
+					m, cmd = m.startPlanning(feedback, true, true)
 					return m, cmd
 				}
 			}
@@ -301,7 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentStepIdx++
 					m.feedbackInput.Blur()
 					if m.currentStepIdx >= len(m.steps) {
-						return m.startValidation()
+						m.state = screenFinished
 					}
 					return m, nil
 				case "ctrl+r":
@@ -392,25 +393,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case screenFinished:
+		case screenFinished, screenError:
 			switch msg.String() {
 			case "enter":
-				m.state = screenPromptInput
-				m.promptInput.SetValue("")
-				m.promptInput.Focus()
-				m.steps = nil
-				m.rawPlan = ""
-				m.streamingLog = ""
-				m.executionLog = ""
-				m.currentStepIdx = 0
-				m.autoExecute = false
-				m.isExecuting = false
+				m.state = screenSessionPrompt
+				m.selectedSessionOption = 0
 				return m, nil
 			}
 
-		case screenError:
+		case screenSessionPrompt:
 			switch msg.String() {
+			case "up", "down", "j", "k", "tab":
+				if m.selectedSessionOption == 0 {
+					m.selectedSessionOption = 1
+				} else {
+					m.selectedSessionOption = 0
+				}
+				return m, nil
 			case "enter":
+				if m.selectedSessionOption == 0 {
+					m.continueSession = true
+				} else {
+					m.continueSession = false
+				}
 				m.state = screenPromptInput
 				m.promptInput.SetValue("")
 				m.promptInput.Focus()
@@ -456,44 +461,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.state == screenValidating {
-			reviewOutput := msg.plan
-			if strings.Contains(strings.ToUpper(reviewOutput), "VALID") && !strings.Contains(reviewOutput, "=== STEP ===") {
-				// The changes are valid! Go to finished screen
-				m.state = screenFinished
-				return m, nil
-			}
-
-			// Try to parse correction steps
-			steps, err := ParseBlueprint(reviewOutput)
-			if err != nil || len(steps) == 0 {
-				m.state = screenFinished
-				return m, nil
-			}
-
-			// Adjust indices to be consecutive with existing steps
-			startIdx := len(m.steps) + 1
-			for i := range steps {
-				steps[i].Index = startIdx + i
-				steps[i].Status = StatePending
-			}
-
-			// Append new correction steps to m.steps
-			m.steps = append(m.steps, steps...)
-
-			// Set the active step index to the first new correction step
-			m.currentStepIdx = startIdx - 1
-			m.state = screenExecution
-			m.autoExecute = false // Let user review and run the corrections
-			m.statusMsg = ""
-			
-			// Refresh viewport content
-			wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
-			m.viewport.SetContent(wrapped)
-
-			return m, nil
-		}
-
 		m.rawPlan = msg.plan
 		steps, err := ParseBlueprint(m.rawPlan)
 		if err != nil {
@@ -501,6 +468,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("failed to parse plan: %w", err)
 			return m, nil
 		}
+
+		// Programmatically append Code Review and Build/Lint/Test steps!
+		steps = append(steps, Step{
+			Index:       len(steps) + 1,
+			Type:        StepCommand,
+			Command:     "foreman-code-review",
+			Description: "Cloud Code Review Validation (AGY)",
+			Status:      StatePending,
+		})
+		steps = append(steps, Step{
+			Index:       len(steps) + 1,
+			Type:        StepCommand,
+			Command:     "foreman-build-lint-test",
+			Description: "Project Build, Lint & Test Verification",
+			Status:      StatePending,
+		})
+
 		m.steps = steps
 		
 		// Setup viewport with plan details and wrap text
@@ -520,14 +504,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			step.Status = StateError
 			step.ErrorMsg = msg.err.Error()
 			m.autoExecute = false // Pause auto execution on error
+			
+			if step.Command == "foreman-code-review" {
+				steps, parseErr := ParseBlueprint(m.executionLog)
+				if parseErr == nil && len(steps) > 0 {
+					// We parsed correction steps!
+					// We will insert them right BEFORE the current code-review step.
+					// The index of the current code-review step is m.currentStepIdx.
+					
+					var newSteps []Step
+					
+					// 1. Copy steps before the current code-review step
+					newSteps = append(newSteps, m.steps[:m.currentStepIdx]...)
+					
+					// 2. Insert correction steps
+					startIdx := m.currentStepIdx + 1
+					for i := range steps {
+						steps[i].Index = startIdx + i
+						steps[i].Status = StatePending
+						newSteps = append(newSteps, steps[i])
+					}
+					
+					// 3. Copy the remaining steps (including the code-review step and build step), shifting their indices!
+					shift := len(steps)
+					for i := m.currentStepIdx; i < len(m.steps); i++ {
+						shiftedStep := m.steps[i]
+						shiftedStep.Index += shift
+						// Reset code-review and build steps to pending so they run again!
+						shiftedStep.Status = StatePending
+						shiftedStep.ErrorMsg = ""
+						shiftedStep.Feedback = ""
+						newSteps = append(newSteps, shiftedStep)
+					}
+					
+					m.steps = newSteps
+					
+					m.feedbackInput.SetValue("")
+					m.feedbackInput.Blur()
+					
+					// Refresh viewport content
+					wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
+					m.viewport.SetContent(wrapped)
+					
+					return m, nil
+				}
+			}
+
 			m.feedbackInput.SetValue("")
-			m.feedbackInput.Focus() // Focus text input for fix instructions
+			m.feedbackInput.Focus() // Focus text input for manual fix instructions
 		} else {
 			step.Status = StateSuccess
 			m.currentStepIdx++
 
 			if m.currentStepIdx >= len(m.steps) {
-				return m.startValidation()
+				m.state = screenFinished
 			} else if m.autoExecute {
 				// Immediately execute next step
 				nextStep := &m.steps[m.currentStepIdx]
@@ -593,7 +623,7 @@ func (m Model) View() string {
 		s.WriteString(m.promptInput.View())
 		s.WriteString("\n\n" + helpStyle.Render("[Enter] Submit prompt to AGY for planning  |  Type /exit to quit"))
 
-	case screenPlanning, screenValidating:
+	case screenPlanning:
 		s.WriteString(fmt.Sprintf("%s %s\n\n", m.spinner.View(), m.statusMsg))
 		
 		// Header = 9 lines (art + spacing)
@@ -697,12 +727,25 @@ func (m Model) View() string {
 	case screenFinished:
 		s.WriteString(successStyle.Render("🎉 Blueprint execution finished successfully!") + "\n\n")
 		s.WriteString("All files updated and commands executed without errors.\n")
-		s.WriteString(helpStyle.Render("Press [Enter] to start a new task, or type /exit in the next prompt to quit."))
+		s.WriteString(helpStyle.Render("Press [Enter] to choose session mode & start next task"))
 
 	case screenError:
 		s.WriteString(errorStyle.Render("❌ Error occurred:") + "\n\n")
 		s.WriteString(m.err.Error())
-		s.WriteString("\n\n" + helpStyle.Render("Press [Enter] to go back to the prompt, or type /exit to quit."))
+		s.WriteString("\n\n" + helpStyle.Render("Press [Enter] to choose session mode, or type /exit to quit."))
+
+	case screenSessionPrompt:
+		s.WriteString("🔄 Task execution finished!\n\n")
+		s.WriteString("Would you like to continue in the current session or start a new one?\n")
+		s.WriteString("Continuing keeps the previous history and files in memory for the next task.\n\n")
+		for i, opt := range []string{"Continue current session (keeps context & history)", "Start a new session (fresh start)"} {
+			if i == m.selectedSessionOption {
+				s.WriteString(fmt.Sprintf("  > %s\n", selectedItemStyle.Render(opt)))
+			} else {
+				s.WriteString(fmt.Sprintf("    %s\n", itemStyle.Render(opt)))
+			}
+		}
+		s.WriteString("\n" + helpStyle.Render("[Up/Down] Navigate  |  [Enter] Select Option"))
 	}
 
 	// Count how many newlines are in our rendered content so far
@@ -769,13 +812,15 @@ func (m Model) loadModelsCmd() tea.Msg {
 	return modelsLoadedMsg(models)
 }
 
-func (m Model) startPlanning(prompt string, isContinue bool) (Model, tea.Cmd) {
+func (m Model) startPlanning(prompt string, isContinue bool, isRefinement bool) (Model, tea.Cmd) {
 	m.state = screenPlanning
 	m.streamingLog = ""
 	m.agyRunner = newAGYRunner()
 
-	if isContinue {
+	if isRefinement {
 		m.statusMsg = "Refining plan with AGY based on feedback..."
+	} else if isContinue {
+		m.statusMsg = "Running AGY CLI in continue mode for the new task..."
 	} else {
 		m.statusMsg = "Running AGY CLI to analyze the workspace and create the plan..."
 	}
@@ -783,18 +828,27 @@ func (m Model) startPlanning(prompt string, isContinue bool) (Model, tea.Cmd) {
 	go func() {
 		var plan string
 		var err error
-		if isContinue {
+		if isRefinement {
 			refinementPrompt := fmt.Sprintf(`The user provided feedback to refine the blueprint. Please update the step-by-step blueprint accordingly. 
 
 User Feedback:
 %s
 
-Remember to follow the exact "=== STEP ===" structure for all steps, and do not execute any commands or write files yourself. Return ONLY the refined steps.
-Crucial: Ensure that the final step remains a verification 'command' step that compiles, lints, and tests the project (based on the project type you identified).`, prompt)
+Remember to follow the exact "=== STEP ===" structure for all steps, and do not execute any commands or write files yourself. Return ONLY the refined steps.`, prompt)
 			plan, err = RunAGY(m.cwd, refinementPrompt, true, m.agyRunner.progress)
 		} else {
-			planningPrompt := BuildInitialPlanningPrompt(prompt)
-			plan, err = RunAGY(m.cwd, planningPrompt, false, m.agyRunner.progress)
+			var planningPrompt string
+			if isContinue {
+				planningPrompt = fmt.Sprintf(`The user has a new task request to run in the current session. Please analyze the workspace and previous actions, and output a new step-by-step blueprint.
+
+User Request:
+%s
+
+%s`, prompt, GetBlueprintRulesPrompt())
+			} else {
+				planningPrompt = BuildInitialPlanningPrompt(prompt)
+			}
+			plan, err = RunAGY(m.cwd, planningPrompt, isContinue, m.agyRunner.progress)
 		}
 		m.agyRunner.result <- agyResult{plan: plan, err: err}
 	}()
@@ -813,66 +867,6 @@ func (m Model) listenAGYProgressCmd() tea.Cmd {
 			return agyCompletedMsg(res)
 		}
 	}
-}
-
-func (m Model) startValidation() (Model, tea.Cmd) {
-	m.state = screenValidating
-	m.streamingLog = ""
-	m.statusMsg = "Running cloud code review validation on implemented changes..."
-	m.agyRunner = newAGYRunner()
-
-	go func() {
-		// 1. Get git diff
-		diffCmd := exec.Command("git", "diff")
-		diffCmd.Dir = m.cwd
-		diffOut, err := diffCmd.CombinedOutput()
-		if err != nil {
-			// If git fails, fallback to finished
-			m.agyRunner.result <- agyResult{plan: "VALID", err: nil}
-			return
-		}
-
-		diffStr := string(diffOut)
-		if strings.TrimSpace(diffStr) == "" {
-			// No changes made? Return VALID
-			m.agyRunner.result <- agyResult{plan: "VALID", err: nil}
-			return
-		}
-
-		// 2. Build review prompt
-		reviewPrompt := fmt.Sprintf(`You are the Senior Code Reviewer.
-The junior developer (local model) has implemented the requested task. Here is the git diff of the modifications made in the workspace:
----
-%s
----
-
-Please review this diff for any syntax errors, compile errors, accidental deletions, naming mismatches, or incorrect modifications.
-- If everything is correct and complete, output ONLY the word "VALID" (with no other text).
-- If there are errors, output one or more correction steps formatted EXACTLY as follows:
-=== STEP ===
-Type: modify
-Path: [relative path to the file]
-Description: [brief description of the fix]
-
-TargetBlock:
-%s
-[Specify the EXACT block of lines to look for in the file so the worker knows where to edit.]
-%s
-
-Instructions:
-%s
-[Provide the exact instructions or replacement block to fix the bug.]
-%s
-=== END ===
-
-Do not execute any commands or write files yourself. Return ONLY "VALID" or the correction steps in the format above.`, diffStr, "```", "```", "```", "```")
-
-		// 3. Run AGY to review
-		reviewOut, runErr := RunAGY(m.cwd, reviewPrompt, true, m.agyRunner.progress)
-		m.agyRunner.result <- agyResult{plan: reviewOut, err: runErr}
-	}()
-
-	return m, m.listenAGYProgressCmd()
 }
 
 func (m Model) startStepExecution(step *Step) (Model, tea.Cmd) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,12 @@ func ExecuteStep(cwd string, model string, step *Step, progressChan chan string)
 	case StepModify:
 		return executeModify(cwd, model, step, progressChan)
 	case StepCommand:
+		if step.Command == "foreman-code-review" {
+			return executeForemanCodeReview(cwd, step, progressChan)
+		}
+		if step.Command == "foreman-build-lint-test" {
+			return executeForemanBuildLintTest(cwd, step, progressChan)
+		}
 		return executeCommand(cwd, step, progressChan)
 	default:
 		step.Status = StateError
@@ -297,3 +304,198 @@ func cleanReplacementContent(content string) string {
 	}
 	return strings.Join(cleaned, "\n")
 }
+
+func executeForemanCodeReview(cwd string, step *Step, progressChan chan string) error {
+	progressChan <- "Running cloud code review validation on implemented changes...\n"
+	
+	// 1. Get git diff
+	diffCmd := exec.Command("git", "diff")
+	diffCmd.Dir = cwd
+	diffOut, err := diffCmd.CombinedOutput()
+	if err != nil {
+		progressChan <- "Workspace is not a git repository or git command failed. Skipping code review.\n"
+		step.Status = StateSuccess
+		return nil
+	}
+
+	diffStr := string(diffOut)
+	if strings.TrimSpace(diffStr) == "" {
+		progressChan <- "No modifications detected. Skipping code review.\n"
+		step.Status = StateSuccess
+		return nil
+	}
+
+	progressChan <- "Sending git diff to AGY for review...\n\n"
+
+	// 2. Build review prompt
+	reviewPrompt := fmt.Sprintf(`You are the Senior Code Reviewer.
+The junior developer (local model) has implemented the requested task. Here is the git diff of the modifications made in the workspace:
+---
+%s
+---
+
+Please review this diff for any syntax errors, compile errors, accidental deletions, naming mismatches, or incorrect modifications.
+- If everything is correct and complete, output ONLY the word "VALID" (with no other text).
+- If there are errors, output one or more correction steps formatted EXACTLY as follows:
+=== STEP ===
+Type: modify
+Path: [relative path to the file]
+Description: [brief description of the fix]
+
+TargetBlock:
+%s
+[Specify the EXACT block of lines to look for in the file so the worker knows where to edit.]
+%s
+
+Instructions:
+%s
+[Provide the exact instructions or replacement block to fix the bug.]
+%s
+=== END ===
+
+Do not execute any commands or write files yourself. Return ONLY "VALID" or the correction steps in the format above.`, diffStr, "```", "```", "```", "```")
+
+	// 3. Run AGY to review
+	reviewOut, runErr := RunAGY(cwd, reviewPrompt, true, progressChan)
+	if runErr != nil {
+		step.Status = StateError
+		step.ErrorMsg = fmt.Sprintf("Cloud review execution failed: %s", runErr.Error())
+		return runErr
+	}
+
+	if strings.Contains(strings.ToUpper(reviewOut), "VALID") && !strings.Contains(reviewOut, "=== STEP ===") {
+		progressChan <- "\nCode review validated as OK.\n"
+		step.Status = StateSuccess
+		return nil
+	}
+
+	// Code review found errors
+	step.Status = StateError
+	step.ErrorMsg = "Code review failed: correction steps generated."
+	return fmt.Errorf(step.ErrorMsg)
+}
+
+func executeForemanBuildLintTest(cwd string, step *Step, progressChan chan string) error {
+	progressChan <- "Detecting project build configuration...\n"
+	
+	var commands []string
+
+	// Detect Go
+	if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+		progressChan <- "Go project detected.\n"
+		commands = append(commands, "go build ./...")
+		commands = append(commands, "go test ./...")
+	} else if _, err := os.Stat(filepath.Join(cwd, "package.json")); err == nil {
+		// Detect Node
+		progressChan <- "Node.js project detected.\n"
+		// Read package.json to see what scripts exist
+		packageJsonPath := filepath.Join(cwd, "package.json")
+		bytes, err := os.ReadFile(packageJsonPath)
+		if err == nil {
+			var pkg struct {
+				Scripts map[string]string `json:"scripts"`
+			}
+			if json.Unmarshal(bytes, &pkg) == nil {
+				if _, ok := pkg.Scripts["build"]; ok {
+					commands = append(commands, "npm run build")
+				}
+				if _, ok := pkg.Scripts["lint"]; ok {
+					commands = append(commands, "npm run lint")
+				}
+				if _, ok := pkg.Scripts["test"]; ok {
+					commands = append(commands, "npm test")
+				}
+			}
+		}
+		if len(commands) == 0 {
+			commands = append(commands, "npm run build")
+		}
+	} else if _, err := os.Stat(filepath.Join(cwd, "Cargo.toml")); err == nil {
+		// Detect Rust
+		progressChan <- "Rust project detected.\n"
+		commands = append(commands, "cargo build")
+		commands = append(commands, "cargo test")
+	} else {
+		progressChan <- "Unknown project type. Scanning for common build configurations...\n"
+		commands = append(commands, "make")
+	}
+
+	if len(commands) == 0 {
+		progressChan <- "No build or test commands detected. Skipping verification.\n"
+		step.Status = StateSuccess
+		return nil
+	}
+
+	// Chain commands with "&&"
+	chainedCommand := strings.Join(commands, " && ")
+	progressChan <- fmt.Sprintf("Running verification: %s\n\n", chainedCommand)
+
+	// Update step's command so TUI displays it
+	step.Command = chainedCommand
+
+	// Execute the command
+	cmd := exec.Command("sh", "-c", chainedCommand)
+	cmd.Dir = cwd
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		step.Status = StateError
+		step.ErrorMsg = err.Error()
+		return err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		step.Status = StateError
+		step.ErrorMsg = err.Error()
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		step.Status = StateError
+		step.ErrorMsg = err.Error()
+		return err
+	}
+
+	doneChan := make(chan struct{}, 2)
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, err := stdoutPipe.Read(buf)
+			if n > 0 {
+				progressChan <- string(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		doneChan <- struct{}{}
+	}()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, err := stderrPipe.Read(buf)
+			if n > 0 {
+				progressChan <- string(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		doneChan <- struct{}{}
+	}()
+
+	<-doneChan
+	<-doneChan
+
+	err = cmd.Wait()
+	if err != nil {
+		step.Status = StateError
+		step.ErrorMsg = fmt.Sprintf("verification failed: %s", err.Error())
+		return err
+	}
+
+	progressChan <- "\nVerification completed successfully.\n"
+	step.Status = StateSuccess
+	return nil
+}
+

@@ -10,15 +10,9 @@ import (
 
 const agyPath = "/Users/henrikandersson/.local/bin/agy"
 
-// BuildInitialPlanningPrompt constructs the prompt to send to AGY for the initial plan.
-func BuildInitialPlanningPrompt(userRequest string) string {
-	return fmt.Sprintf(`You are the Foreman Architect. Your task is to investigate the workspace and produce a highly detailed, step-by-step implementation guide (the "Blueprint") for the following request:
-
----
-%s
----
-
-Guidelines for the Blueprint:
+// GetBlueprintRulesPrompt returns the common blueprint formatting and execution rules.
+func GetBlueprintRulesPrompt() string {
+	return fmt.Sprintf(`Guidelines for the Blueprint:
 1. Break the task down into a sequential list of steps.
 2. The instructions must be so precise and unambiguous that a junior developer (or a local code execution model) can execute them step-by-step without making any design choices.
 3. Every step must be categorized as either 'create', 'modify', or 'command'.
@@ -27,7 +21,7 @@ Guidelines for the Blueprint:
 === STEP ===
 Type: [create | modify | command]
 Path: [relative path to the file, or N/A]
-Description: [brief description of what this step does]
+Description: [brief description of the step]
 
 TargetBlock:
 %s
@@ -42,10 +36,20 @@ Instructions:
 %s
 === END ===
 
-5. The Blueprint MUST ALWAYS end with a final verification step of type 'command' that builds, lints, and runs tests for the project. You must inspect the workspace to figure out what kind of project it is, identify how to compile/build it, how to lint it (if a linter is configured), and how to run tests (if tests are present). Combine these checks into a single shell execution command (chained with '&&' e.g. 'npm run build && npm run lint && npm test' or 'go build ./... && go test ./...') and provide it as the final step.
-6. Crucially, when generating instructions for 'modify' steps, explicitly warn the implementing model that it MUST NOT remove, truncate, or omit any code that is not related to the requested change. It must preserve the entire file context, helper functions, and imports exactly intact.
+5. Crucially, when generating instructions for 'modify' steps, explicitly warn the implementing model that it MUST NOT remove, truncate, or omit any code that is not related to the requested change. It must preserve the entire file context, helper functions, and imports exactly intact.
 
-Do not execute any commands or make any file edits yourself. Output ONLY the step-by-step blueprint using the format above. Do not include any introductory or concluding remarks.`, userRequest, "```", "```", "```", "```")
+Do not execute any commands or make any file edits yourself. Output ONLY the step-by-step blueprint using the format above. Do not include any introductory or concluding remarks.`, "```", "```", "```", "```")
+}
+
+// BuildInitialPlanningPrompt constructs the prompt to send to AGY for the initial plan.
+func BuildInitialPlanningPrompt(userRequest string) string {
+	return fmt.Sprintf(`You are the Foreman Architect. Your task is to investigate the workspace and produce a highly detailed, step-by-step implementation guide (the "Blueprint") for the following request:
+
+---
+%s
+---
+
+%s`, userRequest, GetBlueprintRulesPrompt())
 }
 
 // RunAGY executes the AGY CLI to generate or refine the plan, streaming stdout/stderr chunks to progressChan.
