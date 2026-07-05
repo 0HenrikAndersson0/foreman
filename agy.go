@@ -135,11 +135,9 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		doneChan <- struct{}{}
 	}()
 
-	go func() {
-		<-doneChan
-		<-doneChan
-		close(progressChan)
-	}()
+	// Wait for pipe readers to finish
+	<-doneChan
+	<-doneChan
 
 	err = cmd.Wait()
 	if err != nil {
@@ -265,6 +263,19 @@ func FormatStepsMarkdown(steps []Step) string {
 			sb.WriteString("**Instructions/Code**:\n```\n" + s.Instructions + "\n```\n")
 		}
 		sb.WriteString("\n---\n\n")
+	}
+	return sb.String()
+}
+
+// FormatStepsSummaryMarkdown returns a concise human-friendly summary representation of the steps
+func FormatStepsSummaryMarkdown(steps []Step) string {
+	var sb strings.Builder
+	sb.WriteString("## 📋 High-Level Execution Plan\n\n")
+	for _, s := range steps {
+		sb.WriteString(fmt.Sprintf("*   **Step %d** [%s]: %s\n", s.Index, s.Type, s.Description))
+		if s.Path != "" && s.Path != "N/A" {
+			sb.WriteString(fmt.Sprintf("    *   Target File: `%s`\n", s.Path))
+		}
 	}
 	return sb.String()
 }

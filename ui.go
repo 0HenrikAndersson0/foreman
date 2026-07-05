@@ -159,6 +159,7 @@ type Model struct {
 	selectedSessionOption int // 0: continue, 1: new
 	cloudAgents           []string
 	selectedCloudAgent    int
+	showDetailedBlueprint bool
 }
 
 func InitialModel(cwd string) Model {
@@ -181,17 +182,18 @@ func InitialModel(cwd string) Model {
 	fi.Width = 80
 
 	return Model{
-		state:              screenFolderInput,
-		cwd:                cwd,
-		folderInput:        fo,
-		promptInput:        pi,
-		feedbackInput:      fi,
-		spinner:            s,
-		viewport:           viewport.New(80, 20),
-		terminalWidth:      80, // default fallback
-		terminalHeight:     24, // default fallback
-		cloudAgents:        []string{"AGY (Google Antigravity CLI)", "Claude Code (Anthropic CLI)", "GitHub Copilot (GitHub CLI)"},
-		selectedCloudAgent: 0,
+		state:                 screenFolderInput,
+		cwd:                   cwd,
+		folderInput:           fo,
+		promptInput:           pi,
+		feedbackInput:         fi,
+		spinner:               s,
+		viewport:              viewport.New(80, 20),
+		terminalWidth:         80, // default fallback
+		terminalHeight:        24, // default fallback
+		cloudAgents:           []string{"AGY (Google Antigravity CLI)", "Claude Code (Anthropic CLI)", "GitHub Copilot (GitHub CLI)"},
+		selectedCloudAgent:    0,
+		showDetailedBlueprint: false,
 	}
 }
 
@@ -293,6 +295,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = screenExecution
 				m.currentStepIdx = 0
 				m.isExecuting = false
+				return m, nil
+			case "tab":
+				m.showDetailedBlueprint = !m.showDetailedBlueprint
+				var content string
+				if m.showDetailedBlueprint {
+					content = FormatStepsMarkdown(m.steps)
+				} else {
+					content = FormatStepsSummaryMarkdown(m.steps)
+				}
+				wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(content)
+				m.viewport.SetContent(wrapped)
 				return m, nil
 			case "enter":
 				feedback := m.feedbackInput.Value()
@@ -468,7 +481,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = msg.Width - 4
 		m.viewport.Height = msg.Height - 16 // adjust to make space for header & status bar
 		if len(m.steps) > 0 {
-			wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
+			var content string
+			if m.showDetailedBlueprint {
+				content = FormatStepsMarkdown(m.steps)
+			} else {
+				content = FormatStepsSummaryMarkdown(m.steps)
+			}
+			wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(content)
 			m.viewport.SetContent(wrapped)
 		}
 
@@ -491,6 +510,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		steps = filterRedundantSteps(steps)
+
 		// Programmatically append Code Review and Build/Lint/Test steps!
 		steps = append(steps, Step{
 			Index:       len(steps) + 1,
@@ -508,9 +529,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		m.steps = steps
+		m.showDetailedBlueprint = false
 		
 		// Setup viewport with plan details and wrap text
-		wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
+		wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsSummaryMarkdown(m.steps))
 		m.viewport.SetContent(wrapped)
 		m.state = screenReview
 		m.feedbackInput.Focus()
@@ -560,12 +582,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					
 					m.steps = newSteps
+					m.showDetailedBlueprint = false
 					
 					m.feedbackInput.SetValue("")
 					m.feedbackInput.Blur()
 					
 					// Refresh viewport content
-					wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsMarkdown(m.steps))
+					wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(FormatStepsSummaryMarkdown(m.steps))
 					m.viewport.SetContent(wrapped)
 					
 					return m, nil
@@ -688,7 +711,7 @@ func (m Model) View() string {
 		s.WriteString(borderStyle.Render(m.viewport.View()))
 		s.WriteString("\nType feedback to refine the blueprint, or approve to execute:\n")
 		s.WriteString(m.feedbackInput.View())
-		s.WriteString("\n\n" + helpStyle.Render("[Enter] Send feedback  |  [Ctrl+E] Approve and Execute  |  [Ctrl+C] Quit"))
+		s.WriteString("\n\n" + helpStyle.Render("[Enter] Send feedback  |  [Tab] Toggle Detailed View  |  [Ctrl+E] Approve and Execute  |  [Ctrl+C] Quit"))
 
 	case screenExecution:
 		cloudAgentName := m.cloudAgents[m.selectedCloudAgent]
@@ -892,6 +915,7 @@ User Request:
 			}
 			plan, err = RunCloudAgent(cloudAgentName, m.cwd, planningPrompt, isContinue, m.agyRunner.progress)
 		}
+		close(m.agyRunner.progress)
 		m.agyRunner.result <- agyResult{plan: plan, err: err}
 	}()
 
@@ -941,4 +965,45 @@ func (m Model) listenStepProgressCmd() tea.Cmd {
 			return res
 		}
 	}
+}
+
+func filterRedundantSteps(steps []Step) []Step {
+	patterns := []string{
+		"build",
+		"lint",
+		"test",
+		"compile",
+		"npm test",
+		"npm run build",
+		"npm run lint",
+		"go test",
+		"go build",
+		"cargo build",
+		"cargo test",
+	}
+
+	var newSteps []Step
+	for _, s := range steps {
+		isRedundant := false
+		if s.Type == StepCommand {
+			cmdLower := strings.ToLower(s.Command)
+			descLower := strings.ToLower(s.Description)
+			for _, pat := range patterns {
+				if strings.Contains(cmdLower, pat) || strings.Contains(descLower, pat) {
+					isRedundant = true
+					break
+				}
+			}
+		}
+		if !isRedundant {
+			newSteps = append(newSteps, s)
+		}
+	}
+
+	// Re-index remaining steps to be consecutive
+	for i := range newSteps {
+		newSteps[i].Index = i + 1
+	}
+
+	return newSteps
 }
