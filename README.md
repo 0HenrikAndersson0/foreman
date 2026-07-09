@@ -16,12 +16,21 @@ By splitting the workload—using a high-reasoning cloud model as the **Architec
 graph TD
     A[User Prompt] --> B[Cloud Agent: Architect & Planner]
     B --> C[Generate Blueprint Steps]
-    C --> D[Local Ollama: File Edits & Code Writing]
-    D --> E[Local Shell: Command Executions]
+    
+    subgraph "Automated Inner Loop (Self-Healing)"
+        D[Local Ollama: File Edits via SEARCH/REPLACE]
+        V[Local Shell: Background Syntax Verification]
+        D --> V
+        V -- Syntax Error --> D
+    end
+    
+    C --> D
+    V -- Verified OK --> E[Local Shell: Command Executions]
+    
     E --> F[Cloud Agent: Git Diff Code Review]
     F -- Issues Found --> G[Inject Inline Correction Steps]
     G --> D
-    F -- Validated OK --> H[Local Shell: Automated Build/Lint/Test Verification]
+    F -- Validated OK --> H[Local Shell: Final Build/Lint/Test Verification]
     H --> I[Task Complete!]
 ```
 
@@ -34,8 +43,9 @@ graph TD
     *   **Claude Code (Anthropic CLI)**
     *   **GitHub Copilot (GitHub CLI)**
 *   **Premium Interactive TUI**: Built with Go and Charm's Bubble Tea/Lipgloss frameworks. Features real-time log streaming, scrollable blueprints with auto-wrapping, Dracula-themed status bars, and fixed terminal layout constraints.
-*   **Target Block Replacement**: Small local models (like `qwen2.5-coder:1.5b`) struggle to rewrite large files without losing imports or helpers. Foreman instructs the planner to target specific code ranges and programmatically performs visual block-replaces in Go with 100% precision.
-*   **Interactive Error Self-Healing**: If a compiler or test command fails, execution pauses. You can enter feedback to instruct Ollama to fix it, or let Foreman automatically roll back to the code modification, direct Ollama to apply the fix, and retry.
+*   **Production-Grade Architecture for Small Models**:
+    *   **Context Window Minimization**: Instead of passing massive files into the prompt, Foreman uses Aider-style strict `<<<<` `====` `>>>>` SEARCH/REPLACE blocks. This forces the 7B model to focus strictly on the targeted change, eliminating "lost-in-the-middle" hallucinations.
+    *   **Automated Inner Loop (Self-Healing)**: Foreman extracts project verification commands (e.g., `go build`, `npm run lint`) and runs them automatically in the background after every file edit. If a small model makes a syntax error, Foreman captures the compiler output and automatically feeds it back to the local model to self-correct (up to 3 retries) without requiring user intervention.
 *   **Inline Cloud Code Review**: A built-in code reviewer step runs `git diff` on the workspace and asks the cloud agent to review the changes. If it spots bugs, it dynamically injects correction tasks *directly into the active execution steps list* for the local model to run.
 *   **Automated Build, Lint & Test**: Automatically detects the type of project you are working on (Go, Node.js, Rust, Python, etc.) and runs the corresponding compile, lint, and test suites as the final verification step.
 *   **Multi-Task Session Continuation**: When a task completes, you can choose to continue in the same session. This passes the `--continue` flag to the cloud runner, preserving context history, file modifications, and decisions for the next task.

@@ -160,6 +160,7 @@ type Model struct {
 	cloudAgents           []string
 	selectedCloudAgent    int
 	showDetailedBlueprint bool
+	codeReviewLoopCount   int
 }
 
 func InitialModel(cwd string) Model {
@@ -503,6 +504,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.rawPlan = msg.plan
+		m.codeReviewLoopCount = 0
 		steps, err := ParseBlueprint(m.rawPlan)
 		if err != nil {
 			m.state = screenError
@@ -553,6 +555,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				steps, parseErr := ParseBlueprint(m.executionLog)
 				if parseErr == nil && len(steps) > 0 {
 					// We parsed correction steps!
+					m.codeReviewLoopCount++
+					if m.codeReviewLoopCount > 2 {
+						step.ErrorMsg = "Code review failed 3 times. Please review the diff and provide manual guidance."
+						m.feedbackInput.SetValue("")
+						m.feedbackInput.Focus()
+						return m, nil
+					}
 					// We will insert them right BEFORE the current code-review step.
 					// The index of the current code-review step is m.currentStepIdx.
 					

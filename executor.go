@@ -75,142 +75,177 @@ func executeModify(cwd string, model string, step *Step, progressChan chan strin
 	currentContent := strings.ReplaceAll(string(currentBytes), "\r\n", "\n")
 	targetBlock := strings.ReplaceAll(step.TargetBlock, "\r\n", "\n")
 
-	useBlockReplacement := false
-	if targetBlock != "" && strings.Contains(currentContent, targetBlock) {
-		useBlockReplacement = true
-	}
+	useBlockReplacement := targetBlock != ""
 
-	var prompt string
-	if useBlockReplacement {
-		markedContent := strings.Replace(currentContent, targetBlock, fmt.Sprintf("<<<<<<< ORIGINAL BLOCK (DO NOT EDIT OUTSIDE THIS BLOCK)\n%s\n=======\n[THE NEW CODE FOR THIS BLOCK WILL BE RENDERED HERE ACCORDING TO THE INSTRUCTIONS BELOW]\n>>>>>>>", targetBlock), 1)
+	maxRetries := 3
+	var lastError error
+	var syntaxError string
 
-		if step.Feedback != "" {
-			prompt = fmt.Sprintf(`You are a developer rewriting a specific block of code inside a file to fix a previous attempt.
-We have marked the target block to replace using <<<<<<< and >>>>>>> markers in the file below.
-
-Here is the entire file for context:
----
-%s
----
-
-Your task is to rewrite the ORIGINAL BLOCK of code inside the markers to satisfy these instructions:
----
-Instructions:
-%s
----
-User Correction Feedback:
-%s
----
-
-You MUST output ONLY the new replacement code block that goes between the markers. Do NOT output any other parts of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the original block.
-You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				markedContent, step.Instructions, step.Feedback, "```", "```")
-		} else {
-			prompt = fmt.Sprintf(`You are a developer rewriting a specific block of code inside a file.
-We have marked the target block to replace using <<<<<<< and >>>>>>> markers in the file below.
-
-Here is the entire file for context:
----
-%s
----
-
-Your task is to rewrite the ORIGINAL BLOCK of code inside the markers to satisfy these instructions:
----
-Instructions:
-%s
----
-
-You MUST output ONLY the new replacement code block that goes between the markers. Do NOT output any other parts of the file. Do NOT write any explanation, comments, or intro/outro text. Preserve the indentation level of the original block.
-You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				markedContent, step.Instructions, "```", "```")
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			progressChan <- fmt.Sprintf("Attempt %d/%d to fix error...\n", i+1, maxRetries)
 		}
-	} else {
-		if step.Feedback != "" {
-			prompt = fmt.Sprintf(`You are a developer fixing a previous code modification attempt that failed or had errors.
+
+		var prompt string
+		if useBlockReplacement {
+			prompt = fmt.Sprintf(`You are an expert developer modifying code.
+Your task is to modify the ORIGINAL BLOCK according to these instructions:
+---
+Instructions:
+%s
+---`, step.Instructions)
+			
+			if step.Feedback != "" {
+				prompt += fmt.Sprintf("\nUser Correction Feedback:\n%s\n---", step.Feedback)
+			}
+			
+			if syntaxError != "" {
+				prompt += fmt.Sprintf("\nCRITICAL: Your previous attempt caused this error:\n%s\nFix the error in your new output.\n---", syntaxError)
+			}
+
+			prompt += fmt.Sprintf(`
+Here is the ORIGINAL BLOCK:
+%s
+
+You MUST use the Search/Replace block format to output your changes.
+Example format:
+%s
+<<<<
+old lines to replace
+====
+new lines to add
+>>>>
+%s
+
+Rules:
+1. The 'old lines' must exactly match lines in the ORIGINAL BLOCK.
+2. Output ONLY the Search/Replace block inside a single markdown code block. Do not write explanations.`, 
+			targetBlock, "```", "```")
+
+		} else {
+			prompt = fmt.Sprintf(`You are an expert developer modifying a file.
 Your task is to modify the file according to these instructions:
 ---
 Instructions:
 %s
----
-User Correction Feedback:
-%s
----
+---`, step.Instructions)
+			
+			if step.Feedback != "" {
+				prompt += fmt.Sprintf("\nUser Correction Feedback:\n%s\n---", step.Feedback)
+			}
+			
+			if syntaxError != "" {
+				prompt += fmt.Sprintf("\nCRITICAL: Your previous attempt caused this error:\n%s\nFix the error in your new output.\n---", syntaxError)
+			}
+
+			prompt += fmt.Sprintf(`
 Target Block to Replace (if specified):
 %s
 ---
 
-CRITICAL REQUIREMENT: You MUST output the ENTIRE file content, including all unchanged parts, imports, functions, and comments. You MUST NOT truncate the code, use placeholders, or replace code blocks with comments like '// ... rest of code unchanged ...'. Every line of the original file that is not directly modified must remain exactly intact.
+CRITICAL REQUIREMENT: You MUST output the ENTIRE file content. Do NOT truncate or use placeholders. Every unchanged line must remain exactly intact.
 
 Here is the entire current content of the file:
 %s
 
-Apply the correction and output the ENTIRE updated content of the file.
-Do not write any explanation, comments, or intro/outro text.
-You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				step.Instructions, step.Feedback, targetBlock, currentContent, "```", "```")
-		} else {
-			prompt = fmt.Sprintf(`You are a developer implementing a code modification in an existing file.
-Your task is to modify the file according to these instructions:
----
-Instructions:
-%s
----
-Target Block to Replace (if specified):
-%s
----
-
-CRITICAL REQUIREMENT: You MUST output the ENTIRE file content, including all unchanged parts, imports, functions, and comments. You MUST NOT truncate the code, use placeholders, or replace code blocks with comments like '// ... rest of code unchanged ...'. Every line of the original file that is not directly modified must remain exactly intact.
-
-Here is the entire current content of the file:
-%s
-
-Apply the modification and output the ENTIRE updated content of the file.
-Do not write any explanation, comments, or intro/outro text.
-You MUST output the final code inside a single markdown code block starting with %s and ending with %s.`, 
-				step.Instructions, targetBlock, currentContent, "```", "```")
+Output the final code inside a single markdown code block starting with %s and ending with %s.`, 
+			targetBlock, currentContent, "```", "```")
 		}
-	}
 
-	// Call Ollama and stream the output to progressChan
-	updatedContentRaw, err := GenerateCode(model, prompt, progressChan)
-	if err != nil {
-		step.Status = StateError
-		step.ErrorMsg = fmt.Sprintf("Ollama generation failed: %s", err.Error())
-		return err
-	}
+		var updatedContentRaw string
+		var genErr error
 
-	// Extract the code block from Ollama's response
-	updatedContent := extractCodeBlock(updatedContentRaw)
-	if updatedContent == "" || updatedContent == updatedContentRaw {
-		if len(updatedContentRaw) > 0 {
-			updatedContent = updatedContentRaw
+		// Bypass Ollama if the Instructions already contain a valid Search/Replace block
+		if strings.Contains(step.Instructions, "<<<<") && strings.Contains(step.Instructions, "====") && strings.Contains(step.Instructions, ">>>>") {
+			LogDebug(cwd, "--- CLOUD AGENT DIRECT FIX ---\nStep: %s\nInstructions contain exact block.", step.Description)
+			if i > 0 {
+				progressChan <- "Cloud-Agent fix applied previously but failed verification. Halting.\n"
+				lastError = fmt.Errorf("cloud agent direct fix failed verification: %s", syntaxError)
+				break
+			}
+			progressChan <- "Direct Cloud-Agent fix detected. Bypassing local model.\n"
+			updatedContentRaw = step.Instructions
 		} else {
+			LogDebug(cwd, "--- SENDING PROMPT TO OLLAMA (Attempt %d) ---\n%s", i+1, prompt)
+			// Call Ollama and stream the output to progressChan
+			updatedContentRaw, genErr = GenerateCode(model, prompt, progressChan)
+			LogDebug(cwd, "--- OLLAMA RAW RESPONSE ---\n%s", updatedContentRaw)
+			if genErr != nil {
+				LogDebug(cwd, "Ollama Generation Error: %v", genErr)
+				lastError = genErr
+				break // if generation fails completely, don't retry
+			}
+		}
+
+		// Extract the code block from Ollama's response
+		updatedContent := extractCodeBlock(updatedContentRaw)
+		if updatedContent == "" || updatedContent == updatedContentRaw {
+			if len(updatedContentRaw) > 0 {
+				updatedContent = updatedContentRaw
+			} else {
+				lastError = fmt.Errorf("Ollama returned an empty response")
+				syntaxError = "Empty response. You must output a code block."
+				continue
+			}
+		}
+
+		var finalContent string
+		if useBlockReplacement {
+			LogDebug(cwd, "Applying Search/Replace block...")
+			finalContent, err = applySearchReplace(cwd, currentContent, updatedContent)
+			if err != nil {
+				LogDebug(cwd, "Search/Replace failed: %v", err)
+				syntaxError = fmt.Sprintf("Failed to apply Search/Replace block: %s\nMake sure your <<<< section exactly matches the original text.", err.Error())
+				lastError = err
+				continue
+			}
+		} else {
+			finalContent = updatedContent
+		}
+
+		// Write the modified content back
+		err = os.WriteFile(fullPath, []byte(finalContent), 0644)
+		if err != nil {
 			step.Status = StateError
-			step.ErrorMsg = "Ollama returned an empty response"
-			return fmt.Errorf(step.ErrorMsg)
+			step.ErrorMsg = fmt.Sprintf("failed to write file %s: %s", step.Path, err.Error())
+			return err
 		}
+
+		// Inner loop verification
+		verifyCommands := getVerificationCommands(cwd, nil)
+		if len(verifyCommands) > 0 {
+			progressChan <- "Running local verification...\n"
+			verifyErrStr := ""
+			for _, cmdStr := range verifyCommands {
+				cmd := exec.Command("sh", "-c", cmdStr)
+				cmd.Dir = cwd
+				out, vErr := cmd.CombinedOutput()
+				if vErr != nil {
+					verifyErrStr += fmt.Sprintf("Command '%s' failed:\n%s\n", cmdStr, string(out))
+				}
+			}
+			
+			if verifyErrStr != "" {
+				syntaxError = verifyErrStr
+				lastError = fmt.Errorf("verification failed")
+				// Revert the file so we can try again
+				_ = os.WriteFile(fullPath, currentBytes, 0644)
+				continue
+			}
+		}
+
+		progressChan <- "\nChanges successfully applied and verified.\n"
+		step.Status = StateSuccess
+		return nil
 	}
 
-	var finalContent string
-	if useBlockReplacement {
-		// Clean the replacement of any markers the model might have output
-		cleanReplacement := cleanReplacementContent(updatedContent)
-		finalContent = strings.Replace(currentContent, targetBlock, cleanReplacement, 1)
+	step.Status = StateError
+	if syntaxError != "" {
+		step.ErrorMsg = fmt.Sprintf("Failed after %d attempts. Last error: %s", maxRetries, syntaxError)
 	} else {
-		finalContent = updatedContent
+		step.ErrorMsg = fmt.Sprintf("Ollama modification failed: %v", lastError)
 	}
-
-	// Write the modified content back
-	err = os.WriteFile(fullPath, []byte(finalContent), 0644)
-	if err != nil {
-		step.Status = StateError
-		step.ErrorMsg = fmt.Sprintf("failed to write file %s: %s", step.Path, err.Error())
-		return err
-	}
-
-	progressChan <- "\nChanges successfully applied to file.\n"
-	step.Status = StateSuccess
-	return nil
+	return lastError
 }
 
 // executeCommand runs a command in the shell, streaming output to progressChan.
@@ -305,6 +340,85 @@ func cleanReplacementContent(content string) string {
 	return strings.Join(cleaned, "\n")
 }
 
+// applySearchReplace parses an Aider-style Search/Replace block and applies it to the file content.
+func applySearchReplace(cwd string, fileContent string, modelOutput string) (string, error) {
+	startIdx := strings.Index(modelOutput, "<<<<")
+	if startIdx == -1 {
+		return "", fmt.Errorf("Search/Replace block failed: missing <<<< marker")
+	}
+
+	divIdx := strings.Index(modelOutput[startIdx:], "====")
+	if divIdx == -1 {
+		return "", fmt.Errorf("Search/Replace block failed: missing ==== marker")
+	}
+	divIdx += startIdx
+
+	endIdx := strings.Index(modelOutput[divIdx:], ">>>>")
+	if endIdx == -1 {
+		return "", fmt.Errorf("Search/Replace block failed: missing >>>> marker")
+	}
+	endIdx += divIdx
+
+	oldCodeRaw := modelOutput[startIdx+4 : divIdx]
+	newCodeRaw := modelOutput[divIdx+4 : endIdx]
+
+	oldCode := strings.Trim(oldCodeRaw, "\r\n")
+	newCode := strings.Trim(newCodeRaw, "\r\n")
+
+	if oldCode == "" {
+		return "", fmt.Errorf("Search/Replace block failed: old code block is empty")
+	}
+
+	// Try exact match first
+	if strings.Contains(fileContent, oldCode) {
+		return strings.Replace(fileContent, oldCode, newCode, 1), nil
+	}
+
+	// Fallback to fuzzy match (ignoring leading/trailing whitespace line by line)
+	oldLinesRaw := strings.Split(oldCode, "\n")
+	var oldLines []string
+	for _, l := range oldLinesRaw {
+		oldLines = append(oldLines, strings.TrimSpace(l))
+	}
+
+	// Remove leading/trailing empty lines from the search block
+	for len(oldLines) > 0 && oldLines[0] == "" {
+		oldLines = oldLines[1:]
+	}
+	for len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+
+	if len(oldLines) == 0 {
+		return "", fmt.Errorf("Search/Replace block failed: old code block is empty or only whitespace")
+	}
+
+	fileLines := strings.Split(fileContent, "\n")
+	matchStartIdx := -1
+	for i := 0; i <= len(fileLines)-len(oldLines); i++ {
+		match := true
+		for j := 0; j < len(oldLines); j++ {
+			if strings.TrimSpace(fileLines[i+j]) != oldLines[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			matchStartIdx = i
+			break
+		}
+	}
+
+	if matchStartIdx == -1 {
+		LogDebug(cwd, "Fuzzy Match Failed. The old lines did not match any contiguous block in the file.\nOldLines parsed:\n%v", oldLines)
+		return "", fmt.Errorf("Search/Replace block failed: the old code block was not found exactly in the file")
+	}
+
+	// Replace the exact matching lines in the original file
+	exactOldBlock := strings.Join(fileLines[matchStartIdx:matchStartIdx+len(oldLines)], "\n")
+	return strings.Replace(fileContent, exactOldBlock, newCode, 1), nil
+}
+
 func executeForemanCodeReview(cwd string, cloudAgent string, step *Step, progressChan chan string) error {
 	progressChan <- fmt.Sprintf("Running cloud code review validation using %s...\n", cloudAgent)
 	
@@ -356,7 +470,7 @@ TargetBlock:
 
 Instructions:
 %s
-[Provide the exact instructions or replacement block to fix the bug.]
+[Provide the exact instructions to fix the bug. CRITICAL: For modifications, you MUST provide the exact Aider-style Search/Replace block (using <<<<, ====, >>>>) inside the Instructions field so it can be applied instantly without the local model.]
 %s
 === END ===
 
@@ -385,48 +499,7 @@ Do not execute any commands or write files yourself. Return ONLY "VALID" or the 
 func executeForemanBuildLintTest(cwd string, step *Step, progressChan chan string) error {
 	progressChan <- "Detecting project build configuration...\n"
 	
-	var commands []string
-
-	// Detect Go
-	if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
-		progressChan <- "Go project detected.\n"
-		commands = append(commands, "go build ./...")
-		commands = append(commands, "go test ./...")
-	} else if _, err := os.Stat(filepath.Join(cwd, "package.json")); err == nil {
-		// Detect Node
-		progressChan <- "Node.js project detected.\n"
-		// Read package.json to see what scripts exist
-		packageJsonPath := filepath.Join(cwd, "package.json")
-		bytes, err := os.ReadFile(packageJsonPath)
-		if err == nil {
-			var pkg struct {
-				Scripts map[string]string `json:"scripts"`
-			}
-			if json.Unmarshal(bytes, &pkg) == nil {
-				if _, ok := pkg.Scripts["build"]; ok {
-					commands = append(commands, "npm run build")
-				}
-				if _, ok := pkg.Scripts["lint"]; ok {
-					commands = append(commands, "npm run lint")
-				}
-				if _, ok := pkg.Scripts["test"]; ok {
-					commands = append(commands, "npm test")
-				}
-			}
-		}
-		if len(commands) == 0 {
-			commands = append(commands, "npm run build")
-		}
-	} else if _, err := os.Stat(filepath.Join(cwd, "Cargo.toml")); err == nil {
-		// Detect Rust
-		progressChan <- "Rust project detected.\n"
-		commands = append(commands, "cargo build")
-		commands = append(commands, "cargo test")
-	} else {
-		progressChan <- "Unknown project type. Scanning for common build configurations...\n"
-		commands = append(commands, "make")
-	}
-
+	commands := getVerificationCommands(cwd, progressChan)
 	if len(commands) == 0 {
 		progressChan <- "No build or test commands detected. Skipping verification.\n"
 		step.Status = StateSuccess
@@ -506,3 +579,51 @@ func executeForemanBuildLintTest(cwd string, step *Step, progressChan chan strin
 	return nil
 }
 
+func getVerificationCommands(cwd string, progressChan chan string) []string {
+	var commands []string
+
+	if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+		if progressChan != nil {
+			progressChan <- "Go project detected.\n"
+		}
+		commands = append(commands, "go build ./...")
+		commands = append(commands, "go test ./...")
+	} else if _, err := os.Stat(filepath.Join(cwd, "package.json")); err == nil {
+		if progressChan != nil {
+			progressChan <- "Node.js project detected.\n"
+		}
+		packageJsonPath := filepath.Join(cwd, "package.json")
+		bytes, err := os.ReadFile(packageJsonPath)
+		if err == nil {
+			var pkg struct {
+				Scripts map[string]string `json:"scripts"`
+			}
+			if json.Unmarshal(bytes, &pkg) == nil {
+				if _, ok := pkg.Scripts["build"]; ok {
+					commands = append(commands, "npm run build")
+				}
+				if _, ok := pkg.Scripts["lint"]; ok {
+					commands = append(commands, "npm run lint")
+				}
+				if _, ok := pkg.Scripts["test"]; ok {
+					commands = append(commands, "npm test")
+				}
+			}
+		}
+		if len(commands) == 0 {
+			commands = append(commands, "npm run build")
+		}
+	} else if _, err := os.Stat(filepath.Join(cwd, "Cargo.toml")); err == nil {
+		if progressChan != nil {
+			progressChan <- "Rust project detected.\n"
+		}
+		commands = append(commands, "cargo build")
+		commands = append(commands, "cargo test")
+	} else {
+		if progressChan != nil {
+			progressChan <- "Unknown project type. Scanning for common build configurations...\n"
+		}
+		commands = append(commands, "make")
+	}
+	return commands
+}
