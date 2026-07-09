@@ -119,7 +119,8 @@ new lines to add
 
 Rules:
 1. The 'old lines' must exactly match lines in the ORIGINAL BLOCK.
-2. Output ONLY the Search/Replace block inside a single markdown code block. Do not write explanations.`, 
+2. Output ONLY the Search/Replace block inside a single markdown code block. Do not write explanations.
+3. CRITICAL: DO NOT use placeholders like "// ..." or "..." to skip code. You MUST write every single line of the old block explicitly.`, 
 			targetBlock, "```", "```")
 
 		} else {
@@ -353,6 +354,16 @@ func applySearchReplace(cwd string, fileContent string, modelOutput string) (str
 	}
 	divIdx += startIdx
 
+	// Check for multiple ==== markers (a common model hallucination)
+	secondDivIdx := strings.Index(modelOutput[divIdx+4:], "====")
+	if secondDivIdx != -1 {
+		// Only consider it an error if the second ==== is before the >>>> marker
+		endMarkerIdx := strings.Index(modelOutput[divIdx:], ">>>>")
+		if endMarkerIdx != -1 && secondDivIdx < endMarkerIdx {
+			return "", fmt.Errorf("Search/Replace block failed: multiple ==== markers found. Do not repeat the divider")
+		}
+	}
+
 	endIdx := strings.Index(modelOutput[divIdx:], ">>>>")
 	if endIdx == -1 {
 		return "", fmt.Errorf("Search/Replace block failed: missing >>>> marker")
@@ -393,30 +404,115 @@ func applySearchReplace(cwd string, fileContent string, modelOutput string) (str
 		return "", fmt.Errorf("Search/Replace block failed: old code block is empty or only whitespace")
 	}
 
+	var chunks [][]string
+	var currentChunk []string
+	hasWildcard := false
+	for _, l := range oldLines {
+		if l == "..." || l == "// ..." || l == "/* ... */" || l == "//..." {
+			if len(currentChunk) > 0 {
+				chunks = append(chunks, currentChunk)
+				currentChunk = nil
+			} else {
+				if len(chunks) == 0 {
+					return "", fmt.Errorf("Search/Replace block failed: cannot start with a wildcard")
+				}
+			}
+			hasWildcard = true
+		} else {
+			currentChunk = append(currentChunk, l)
+		}
+	}
+	if len(currentChunk) > 0 {
+		chunks = append(chunks, currentChunk)
+	}
+
+	if hasWildcard && len(chunks) == 0 {
+		return "", fmt.Errorf("Search/Replace block failed: old code block is only wildcards")
+	}
+
 	fileLines := strings.Split(fileContent, "\n")
 	matchStartIdx := -1
-	for i := 0; i <= len(fileLines)-len(oldLines); i++ {
-		match := true
-		for j := 0; j < len(oldLines); j++ {
-			if strings.TrimSpace(fileLines[i+j]) != oldLines[j] {
-				match = false
+	matchEndIdx := -1
+	searchStartLine := 0
+	var skippedBlocks []string
+
+	if !hasWildcard {
+		// normal contiguous matching
+		for i := 0; i <= len(fileLines)-len(oldLines); i++ {
+			match := true
+			for j := 0; j < len(oldLines); j++ {
+				if strings.TrimSpace(fileLines[i+j]) != oldLines[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				matchStartIdx = i
+				matchEndIdx = i + len(oldLines)
 				break
 			}
 		}
-		if match {
-			matchStartIdx = i
-			break
+	} else {
+		// Wildcard matching
+		for cIdx, chunk := range chunks {
+			found := false
+			for i := searchStartLine; i <= len(fileLines)-len(chunk); i++ {
+				match := true
+				for j := 0; j < len(chunk); j++ {
+					if strings.TrimSpace(fileLines[i+j]) != chunk[j] {
+						match = false
+						break
+					}
+				}
+				if match {
+					if cIdx == 0 {
+						matchStartIdx = i
+					} else {
+						// Record the skipped lines
+						skipped := fileLines[searchStartLine:i]
+						skippedBlocks = append(skippedBlocks, strings.Join(skipped, "\n"))
+					}
+					searchStartLine = i + len(chunk)
+					if cIdx == len(chunks)-1 {
+						matchEndIdx = searchStartLine
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				break
+			}
 		}
 	}
 
-	if matchStartIdx == -1 {
+	if matchStartIdx == -1 || matchEndIdx == -1 {
 		LogDebug(cwd, "Fuzzy Match Failed. The old lines did not match any contiguous block in the file.\nOldLines parsed:\n%v", oldLines)
 		return "", fmt.Errorf("Search/Replace block failed: the old code block was not found exactly in the file")
 	}
 
+	finalNewCode := newCode
+	if hasWildcard {
+		newLinesRaw := strings.Split(newCode, "\n")
+		var reconstructedNewLines []string
+		skipIdx := 0
+		for _, l := range newLinesRaw {
+			trimmed := strings.TrimSpace(l)
+			if trimmed == "..." || trimmed == "// ..." || trimmed == "/* ... */" || trimmed == "//..." {
+				if skipIdx < len(skippedBlocks) {
+					reconstructedNewLines = append(reconstructedNewLines, skippedBlocks[skipIdx])
+					skipIdx++
+				}
+			} else {
+				reconstructedNewLines = append(reconstructedNewLines, l)
+			}
+		}
+		finalNewCode = strings.Join(reconstructedNewLines, "\n")
+	}
+
 	// Replace the exact matching lines in the original file
-	exactOldBlock := strings.Join(fileLines[matchStartIdx:matchStartIdx+len(oldLines)], "\n")
-	return strings.Replace(fileContent, exactOldBlock, newCode, 1), nil
+	exactOldBlock := strings.Join(fileLines[matchStartIdx:matchEndIdx], "\n")
+	return strings.Replace(fileContent, exactOldBlock, finalNewCode, 1), nil
 }
 
 func executeForemanCodeReview(cwd string, cloudAgent string, step *Step, progressChan chan string) error {
@@ -453,7 +549,8 @@ Your primary goal is to verify that:
 2. No required code, imports, or helper functions were accidentally removed or truncated.
 
 CRITICAL RULES:
-- Ignore any stylistic refactoring, code cleaning, formatting, or optional improvements. Do NOT output correction steps for style, cleanups, or refactorings that do not affect compilation or task correctness.
+- Ignore any stylistic refactoring, code cleaning, formatting, or optional improvements. Focus purely on bug detection and logic flaws, not stylistic nitpicks.
+- If you provide modifications, DO NOT use placeholders like "// ..." or "..." to skip code in the old block. You MUST write every single line of the old block explicitly.
 - Only generate correction steps if there is a compile/syntax error, missing necessary logic, or if essential code was accidentally deleted.
 - If the changes are functional, correct, and do not break compilation (even if they could be cleaner), output ONLY the word "VALID" (with no other text).
 

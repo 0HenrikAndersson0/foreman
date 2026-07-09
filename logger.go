@@ -7,6 +7,25 @@ import (
 	"time"
 )
 
+// InitLogger clears the .foreman/debug.log file at startup.
+func InitLogger(cwd string) {
+	if cwd == "" {
+		cwd = "."
+	}
+
+	logDir := filepath.Join(cwd, ".foreman")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return
+	}
+
+	logFile := filepath.Join(logDir, "debug.log")
+	// Open with O_TRUNC to wipe the file clean
+	f, err := os.OpenFile(logFile, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Close()
+	}
+}
+
 // LogDebug appends a formatted message to .foreman/debug.log in the target cwd.
 func LogDebug(cwd string, format string, args ...interface{}) {
 	if cwd == "" {

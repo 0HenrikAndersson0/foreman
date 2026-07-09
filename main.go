@@ -15,7 +15,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 2. Initialize and run Bubble Tea program
+	// 2. Initialize logger (wipe previous log)
+	InitLogger(cwd)
+
+	// 3. Initialize and run Bubble Tea program
 	p := tea.NewProgram(InitialModel(cwd), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Alas, there's been an error: %v\n", err)
