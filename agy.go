@@ -63,7 +63,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		if isContinue {
 			args = append(args, "--continue")
 		}
-		args = append(args, "--print", prompt)
+		args = append(args, "--dangerously-skip-permissions", "--print", prompt)
 	} else if strings.Contains(providerClean, "claude") {
 		cmdName = "claude"
 		_, pathErr := exec.LookPath("claude")
@@ -82,7 +82,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		if isContinue {
 			args = append(args, "--continue")
 		}
-		args = append(args, "--print", prompt)
+		args = append(args, "--dangerously-skip-permissions", "--print", prompt)
 	}
 
 	cmd := exec.Command(cmdName, args...)
