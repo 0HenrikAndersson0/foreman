@@ -16,6 +16,14 @@ func resolvePath(cwd, stepPath string) string {
 	if strings.HasPrefix(cleanPath, "/") {
 		cleanPath = strings.TrimPrefix(cleanPath, "/")
 	}
+	
+	// Sometimes the model hallucinates the relative path by prefixing it with the project folder name
+	cwdBasename := filepath.Base(cwd)
+	prefix := cwdBasename + string(filepath.Separator)
+	if strings.HasPrefix(cleanPath, prefix) {
+		cleanPath = strings.TrimPrefix(cleanPath, prefix)
+	}
+
 	return filepath.Join(cwd, cleanPath)
 }
 
