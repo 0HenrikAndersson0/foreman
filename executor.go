@@ -137,12 +137,19 @@ func executeModify(cwd string, model string, step *Step, progressChan chan strin
 
 		var prompt string
 		if useBlockReplacement {
+			contextWindow := extractContextWindow(currentContent, targetBlock)
 			prompt = fmt.Sprintf(`You are an expert developer modifying code.
-Your task is to modify the ORIGINAL BLOCK according to these instructions:
+
+Here is the surrounding code context (for reference only):
+---
+%s
+---
+
+Your task is to modify ONLY the ORIGINAL BLOCK according to these instructions:
 ---
 Instructions:
 %s
----`, step.Instructions)
+---`, contextWindow, step.Instructions)
 			
 			if step.Feedback != "" {
 				prompt += fmt.Sprintf("\nUser Correction Feedback:\n%s\n---", step.Feedback)
@@ -390,6 +397,162 @@ func cleanReplacementContent(content string) string {
 	return strings.Join(cleaned, "\n")
 }
 
+// findTargetBlock returns the start index, end index, and skipped wildcard blocks of the target block within the file lines.
+func findTargetBlock(fileLines []string, oldCode string) (int, int, []string, error) {
+	oldLinesRaw := strings.Split(oldCode, "\n")
+	var oldLines []string
+	for _, l := range oldLinesRaw {
+		oldLines = append(oldLines, strings.TrimSpace(l))
+	}
+
+	for len(oldLines) > 0 && oldLines[0] == "" {
+		oldLines = oldLines[1:]
+	}
+	for len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+
+	if len(oldLines) == 0 {
+		return -1, -1, nil, fmt.Errorf("old code block is empty or only whitespace")
+	}
+
+	var chunks [][]string
+	var currentChunk []string
+	hasWildcard := false
+	for _, l := range oldLines {
+		if l == "..." || l == "// ..." || l == "/* ... */" || l == "//..." {
+			if len(currentChunk) > 0 {
+				chunks = append(chunks, currentChunk)
+				currentChunk = nil
+			} else {
+				if len(chunks) == 0 {
+					return -1, -1, nil, fmt.Errorf("cannot start with a wildcard")
+				}
+			}
+			hasWildcard = true
+		} else {
+			currentChunk = append(currentChunk, l)
+		}
+	}
+	if len(currentChunk) > 0 {
+		chunks = append(chunks, currentChunk)
+	}
+	if hasWildcard && len(chunks) == 0 {
+		return -1, -1, nil, fmt.Errorf("old code block is only wildcards")
+	}
+
+	matchStartIdx := -1
+	matchEndIdx := -1
+	searchStartLine := 0
+	var skippedBlocks []string
+
+	if !hasWildcard {
+		for i := 0; i <= len(fileLines)-len(oldLines); i++ {
+			match := true
+			for j := 0; j < len(oldLines); j++ {
+				if strings.TrimSpace(fileLines[i+j]) != oldLines[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				matchStartIdx = i
+				matchEndIdx = i + len(oldLines)
+				break
+			}
+		}
+	} else {
+		for cIdx, chunk := range chunks {
+			found := false
+			for i := searchStartLine; i <= len(fileLines)-len(chunk); i++ {
+				match := true
+				for j := 0; j < len(chunk); j++ {
+					if strings.TrimSpace(fileLines[i+j]) != chunk[j] {
+						match = false
+						break
+					}
+				}
+				if match {
+					if cIdx == 0 {
+						matchStartIdx = i
+					} else {
+						skipped := fileLines[searchStartLine:i]
+						skippedBlocks = append(skippedBlocks, strings.Join(skipped, "\n"))
+					}
+					searchStartLine = i + len(chunk)
+					if cIdx == len(chunks)-1 {
+						matchEndIdx = searchStartLine
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				break
+			}
+		}
+	}
+
+	if matchStartIdx == -1 || matchEndIdx == -1 {
+		return -1, -1, nil, fmt.Errorf("the old code block was not found exactly in the file")
+	}
+
+	return matchStartIdx, matchEndIdx, skippedBlocks, nil
+}
+
+// extractContextWindow safely grabs the first 30 lines of the file, plus 20 lines around the target block.
+func extractContextWindow(fileContent, targetBlock string) string {
+	fileLines := strings.Split(fileContent, "\n")
+	
+	// If the file is very small, just return the whole file
+	if len(fileLines) <= 80 {
+		return fileContent
+	}
+
+	startIdx, endIdx, _, err := findTargetBlock(fileLines, targetBlock)
+	if err != nil {
+		// If we can't find it, fallback to the full file (which Ollama can handle since we bumped num_ctx)
+		return fileContent 
+	}
+
+	// Always include top 30 lines
+	topLinesCount := 30
+	if topLinesCount > len(fileLines) {
+		topLinesCount = len(fileLines)
+	}
+
+	// Calculate context window boundaries
+	contextStart := startIdx - 20
+	if contextStart < 0 {
+		contextStart = 0
+	}
+	contextEnd := endIdx + 20
+	if contextEnd > len(fileLines) {
+		contextEnd = len(fileLines)
+	}
+
+	var builder strings.Builder
+	
+	// Print Top Lines
+	for i := 0; i < topLinesCount; i++ {
+		builder.WriteString(fileLines[i] + "\n")
+	}
+
+	// If the top lines don't overlap with the context window, add a separator
+	if topLinesCount < contextStart {
+		builder.WriteString("\n// ... (lines skipped) ...\n\n")
+	} else {
+		// They overlap! Adjust contextStart to avoid duplicating lines
+		contextStart = topLinesCount
+	}
+
+	for i := contextStart; i < contextEnd; i++ {
+		builder.WriteString(fileLines[i] + "\n")
+	}
+
+	return builder.String()
+}
+
 // applySearchReplace parses an Aider-style Search/Replace block and applies it to the file content.
 func applySearchReplace(cwd string, fileContent string, modelOutput string) (string, error) {
 	startIdx := strings.Index(modelOutput, "<<<<")
@@ -434,113 +597,16 @@ func applySearchReplace(cwd string, fileContent string, modelOutput string) (str
 		return strings.Replace(fileContent, oldCode, newCode, 1), nil
 	}
 
-	// Fallback to fuzzy match (ignoring leading/trailing whitespace line by line)
-	oldLinesRaw := strings.Split(oldCode, "\n")
-	var oldLines []string
-	for _, l := range oldLinesRaw {
-		oldLines = append(oldLines, strings.TrimSpace(l))
-	}
-
-	// Remove leading/trailing empty lines from the search block
-	for len(oldLines) > 0 && oldLines[0] == "" {
-		oldLines = oldLines[1:]
-	}
-	for len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
-		oldLines = oldLines[:len(oldLines)-1]
-	}
-
-	if len(oldLines) == 0 {
-		return "", fmt.Errorf("Search/Replace block failed: old code block is empty or only whitespace")
-	}
-
-	var chunks [][]string
-	var currentChunk []string
-	hasWildcard := false
-	for _, l := range oldLines {
-		if l == "..." || l == "// ..." || l == "/* ... */" || l == "//..." {
-			if len(currentChunk) > 0 {
-				chunks = append(chunks, currentChunk)
-				currentChunk = nil
-			} else {
-				if len(chunks) == 0 {
-					return "", fmt.Errorf("Search/Replace block failed: cannot start with a wildcard")
-				}
-			}
-			hasWildcard = true
-		} else {
-			currentChunk = append(currentChunk, l)
-		}
-	}
-	if len(currentChunk) > 0 {
-		chunks = append(chunks, currentChunk)
-	}
-
-	if hasWildcard && len(chunks) == 0 {
-		return "", fmt.Errorf("Search/Replace block failed: old code block is only wildcards")
-	}
-
 	fileLines := strings.Split(fileContent, "\n")
-	matchStartIdx := -1
-	matchEndIdx := -1
-	searchStartLine := 0
-	var skippedBlocks []string
-
-	if !hasWildcard {
-		// normal contiguous matching
-		for i := 0; i <= len(fileLines)-len(oldLines); i++ {
-			match := true
-			for j := 0; j < len(oldLines); j++ {
-				if strings.TrimSpace(fileLines[i+j]) != oldLines[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				matchStartIdx = i
-				matchEndIdx = i + len(oldLines)
-				break
-			}
-		}
-	} else {
-		// Wildcard matching
-		for cIdx, chunk := range chunks {
-			found := false
-			for i := searchStartLine; i <= len(fileLines)-len(chunk); i++ {
-				match := true
-				for j := 0; j < len(chunk); j++ {
-					if strings.TrimSpace(fileLines[i+j]) != chunk[j] {
-						match = false
-						break
-					}
-				}
-				if match {
-					if cIdx == 0 {
-						matchStartIdx = i
-					} else {
-						// Record the skipped lines
-						skipped := fileLines[searchStartLine:i]
-						skippedBlocks = append(skippedBlocks, strings.Join(skipped, "\n"))
-					}
-					searchStartLine = i + len(chunk)
-					if cIdx == len(chunks)-1 {
-						matchEndIdx = searchStartLine
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
-				break
-			}
-		}
-	}
-
-	if matchStartIdx == -1 || matchEndIdx == -1 {
-		LogDebug(cwd, "Fuzzy Match Failed. The old lines did not match any contiguous block in the file.\nOldLines parsed:\n%v", oldLines)
-		return "", fmt.Errorf("Search/Replace block failed: the old code block was not found exactly in the file")
+	matchStartIdx, matchEndIdx, skippedBlocks, err := findTargetBlock(fileLines, oldCode)
+	if err != nil {
+		LogDebug(cwd, "Fuzzy Match Failed: %v", err)
+		return "", fmt.Errorf("Search/Replace block failed: %v", err)
 	}
 
 	finalNewCode := newCode
+	hasWildcard := strings.Contains(oldCode, "...") || strings.Contains(oldCode, "// ...") || strings.Contains(oldCode, "/* ... */") || strings.Contains(oldCode, "//...")
+
 	if hasWildcard {
 		newLinesRaw := strings.Split(newCode, "\n")
 		var reconstructedNewLines []string

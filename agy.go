@@ -37,6 +37,7 @@ Instructions:
 === END ===
 
 5. Crucially, when generating instructions for 'modify' steps, explicitly warn the implementing model that it MUST NOT remove, truncate, or omit any code that is not related to the requested change. It must preserve the entire file context, helper functions, and imports exactly intact.
+6. CRITICAL RULE FOR MODIFY STEPS: If a task requires editing distant parts of a file (e.g., adding an import at the top, and modifying a function at the bottom), you MUST split them into separate 'modify' steps. Never combine distant edits into a single step, as the local worker relies on small, localized context windows.
 
 Do not execute any commands or make any file edits yourself. Output ONLY the step-by-step blueprint using the format above. Do not include any introductory or concluding remarks.`, "```", "```", "```", "```")
 }
