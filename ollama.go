@@ -47,7 +47,8 @@ func GenerateCode(model string, prompt string, progressChan chan string) (string
 		Prompt: prompt,
 		Stream: true,
 		Options: OllamaOptions{
-			NumCtx: 16384, // Request a 16k context window for larger code files
+			NumCtx:     16384, // Request a 16k context window for larger code files
+			NumPredict: -1,    // Unlimited output generation
 		},
 	}
 

@@ -45,7 +45,8 @@ type OllamaTagsResponse struct {
 
 // OllamaOptions represents optional configuration parameters for model execution.
 type OllamaOptions struct {
-	NumCtx int `json:"num_ctx,omitempty"`
+	NumCtx     int `json:"num_ctx,omitempty"`
+	NumPredict int `json:"num_predict,omitempty"`
 }
 
 // OllamaGenerateRequest represents the request body for /api/generate.
