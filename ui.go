@@ -505,6 +505,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.rawPlan = msg.plan
 		m.codeReviewLoopCount = 0
+		LogDebug(m.cwd, "--- RAW BLUEPRINT RECEIVED ---\n%s\n------------------------------", m.rawPlan)
 		steps, err := ParseBlueprint(m.rawPlan)
 		if err != nil {
 			m.state = screenError

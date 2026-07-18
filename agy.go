@@ -69,9 +69,9 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		_, pathErr := exec.LookPath("claude")
 		if pathErr != nil {
 			cmdName = "npx"
-			args = []string{"-y", "@anthropic-ai/claude-code", "--non-interactive"}
+			args = []string{"-y", "@anthropic-ai/claude-code", "-p"}
 		} else {
-			args = []string{"--non-interactive"}
+			args = []string{"-p"}
 		}
 		args = append(args, prompt)
 	} else if strings.Contains(providerClean, "copilot") {
@@ -102,6 +102,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 	}
 
 	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
 	doneChan := make(chan struct{}, 2)
 
 	go func() {
@@ -126,6 +127,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
+				stderrBuf.WriteString(chunk)
 				progressChan <- chunk
 			}
 			if err != nil {
@@ -144,7 +146,8 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		return "", fmt.Errorf("cloud agent CLI execution failed: %w", err)
 	}
 
-	return stdoutBuf.String(), nil
+	// Combine stdout and stderr because some CLIs print the AI response to stderr
+	return stdoutBuf.String() + "\n" + stderrBuf.String(), nil
 }
 
 // ParseBlueprint parses the markdown output from AGY into structured Step objects.
