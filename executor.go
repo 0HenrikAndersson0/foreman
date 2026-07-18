@@ -9,6 +9,16 @@ import (
 	"strings"
 )
 
+// resolvePath safely resolves a step path against the current working directory, 
+// handling cases where the model hallucinates an absolute path instead of a relative one.
+func resolvePath(cwd, stepPath string) string {
+	cleanPath := strings.TrimPrefix(stepPath, cwd)
+	if strings.HasPrefix(cleanPath, "/") {
+		cleanPath = strings.TrimPrefix(cleanPath, "/")
+	}
+	return filepath.Join(cwd, cleanPath)
+}
+
 // ExecuteStep runs a single step in the blueprint, streaming output to progressChan.
 func ExecuteStep(cwd string, cloudAgent string, model string, step *Step, progressChan chan string) error {
 	step.Status = StateRunning
@@ -37,7 +47,7 @@ func ExecuteStep(cwd string, cloudAgent string, model string, step *Step, progre
 // executeCreate writes a new file to disk.
 func executeCreate(cwd string, step *Step, progressChan chan string) error {
 	progressChan <- fmt.Sprintf("Creating new file: %s...\n", step.Path)
-	fullPath := filepath.Join(cwd, step.Path)
+	fullPath := resolvePath(cwd, step.Path)
 
 	// Ensure the parent directory exists
 	dir := filepath.Dir(fullPath)
@@ -63,7 +73,7 @@ func executeCreate(cwd string, step *Step, progressChan chan string) error {
 // executeModify reads the existing file, prompts Ollama to apply the change, and overwrites the file.
 func executeModify(cwd string, model string, step *Step, progressChan chan string) error {
 	progressChan <- fmt.Sprintf("Modifying file: %s using Ollama (%s)...\n", step.Path, model)
-	fullPath := filepath.Join(cwd, step.Path)
+	fullPath := resolvePath(cwd, step.Path)
 
 	// Read existing file
 	currentBytes, err := os.ReadFile(fullPath)
