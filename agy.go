@@ -37,6 +37,7 @@ Instructions:
 === END ===
 
 5. Crucially, when generating instructions for 'modify' steps, explicitly warn the implementing model that it MUST NOT remove, truncate, or omit any code that is not related to the requested change. It must preserve the entire file context, helper functions, and imports exactly intact.
+6. CRITICAL RULE FOR MODIFY STEPS: If a task requires editing distant parts of a file (e.g., adding an import at the top, and modifying a function at the bottom), you MUST split them into separate 'modify' steps. Never combine distant edits into a single step, as the local worker relies on small, localized context windows.
 
 Do not execute any commands or make any file edits yourself. Output ONLY the step-by-step blueprint using the format above. Do not include any introductory or concluding remarks.`, "```", "```", "```", "```")
 }
@@ -63,15 +64,15 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		if isContinue {
 			args = append(args, "--continue")
 		}
-		args = append(args, "--print", prompt)
+		args = append(args, "--dangerously-skip-permissions", "--print", prompt)
 	} else if strings.Contains(providerClean, "claude") {
 		cmdName = "claude"
 		_, pathErr := exec.LookPath("claude")
 		if pathErr != nil {
 			cmdName = "npx"
-			args = []string{"-y", "@anthropic-ai/claude-code", "--non-interactive"}
+			args = []string{"-y", "@anthropic-ai/claude-code", "-p"}
 		} else {
-			args = []string{"--non-interactive"}
+			args = []string{"-p"}
 		}
 		args = append(args, prompt)
 	} else if strings.Contains(providerClean, "copilot") {
@@ -82,7 +83,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		if isContinue {
 			args = append(args, "--continue")
 		}
-		args = append(args, "--print", prompt)
+		args = append(args, "--dangerously-skip-permissions", "--print", prompt)
 	}
 
 	cmd := exec.Command(cmdName, args...)
@@ -102,6 +103,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 	}
 
 	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
 	doneChan := make(chan struct{}, 2)
 
 	go func() {
@@ -126,6 +128,7 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
+				stderrBuf.WriteString(chunk)
 				progressChan <- chunk
 			}
 			if err != nil {
@@ -144,7 +147,8 @@ func RunCloudAgent(provider string, cwd string, prompt string, isContinue bool, 
 		return "", fmt.Errorf("cloud agent CLI execution failed: %w", err)
 	}
 
-	return stdoutBuf.String(), nil
+	// Combine stdout and stderr because some CLIs print the AI response to stderr
+	return stdoutBuf.String() + "\n" + stderrBuf.String(), nil
 }
 
 // ParseBlueprint parses the markdown output from AGY into structured Step objects.
