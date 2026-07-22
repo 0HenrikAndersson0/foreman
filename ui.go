@@ -644,7 +644,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case spinner.TickMsg:
 			if m.state == screenPlanning {
 				m.spinnerTickCount++
-				if m.spinnerTickCount%20 == 0 {
+				// spinner.Dot ticks every 100ms (10 frames/sec), so 300 ticks = 30 seconds
+				if m.spinnerTickCount%300 == 0 {
 					m.quoteIndex = (m.quoteIndex + 1) % len(aiQuotes)
 					m.statusMsg = aiQuotes[m.quoteIndex]
 				}
