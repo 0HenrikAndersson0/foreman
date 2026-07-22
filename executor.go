@@ -69,7 +69,7 @@ func ExecuteStep(cwd string, cloudAgent string, model string, step *Step, progre
 	default:
 		step.Status = StateError
 		step.ErrorMsg = fmt.Sprintf("unknown step type: %s", step.Type)
-		return fmt.Errorf(step.ErrorMsg)
+		return fmt.Errorf("%s", step.ErrorMsg)
 	}
 }
 
@@ -571,7 +571,7 @@ func applySearchReplace(cwd string, fileContent string, modelOutput string) (str
 	if secondDivIdx != -1 {
 		// Only consider it an error if the second ==== is before the >>>> marker
 		endMarkerIdx := strings.Index(modelOutput[divIdx:], ">>>>")
-		if endMarkerIdx != -1 && secondDivIdx < endMarkerIdx {
+		if endMarkerIdx != -1 && (secondDivIdx+4) < endMarkerIdx {
 			return "", fmt.Errorf("Search/Replace block failed: multiple ==== markers found. Do not repeat the divider")
 		}
 	}
@@ -705,7 +705,7 @@ Do not execute any commands or write files yourself. Return ONLY "VALID" or the 
 	// Code review found errors
 	step.Status = StateError
 	step.ErrorMsg = "Code review failed: correction steps generated."
-	return fmt.Errorf(step.ErrorMsg)
+	return fmt.Errorf("%s", step.ErrorMsg)
 }
 
 func executeForemanBuildLintTest(cwd string, step *Step, progressChan chan string) error {

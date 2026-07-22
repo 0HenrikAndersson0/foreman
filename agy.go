@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const agyPath = "/Users/henrikandersson/.local/bin/agy"
+const agyPath = "agy"
 
 // GetBlueprintRulesPrompt returns the common blueprint formatting and execution rules.
 func GetBlueprintRulesPrompt() string {
