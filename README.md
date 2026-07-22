@@ -18,18 +18,20 @@ graph TD
     B --> C[Generate Blueprint Steps]
     
     subgraph "Automated Inner Loop (Self-Healing)"
+        CW[Extract Hybrid Context Window]
         D[Local Ollama: File Edits via SEARCH/REPLACE]
         V[Local Shell: Background Syntax Verification]
+        CW --> D
         D --> V
-        V -- Syntax Error --> D
+        V -- Syntax Error --> CW
     end
     
-    C --> D
+    C --> CW
     V -- Verified OK --> E[Local Shell: Command Executions]
     
     E --> F[Cloud Agent: Git Diff Code Review]
     F -- Issues Found --> G[Inject Inline Correction Steps]
-    G --> D
+    G --> CW
     F -- Validated OK --> H[Local Shell: Final Build/Lint/Test Verification]
     H --> I[Task Complete!]
 ```
@@ -44,7 +46,9 @@ graph TD
     *   **GitHub Copilot (GitHub CLI)**
 *   **Premium Interactive TUI**: Built with Go and Charm's Bubble Tea/Lipgloss frameworks. Features real-time log streaming, scrollable blueprints with auto-wrapping, Dracula-themed status bars, and fixed terminal layout constraints.
 *   **Production-Grade Architecture for Small Models**:
-    *   **Context Window Minimization**: Instead of passing massive files into the prompt, Foreman uses Aider-style strict `<<<<` `====` `>>>>` SEARCH/REPLACE blocks. This forces the 7B model to focus strictly on the targeted change, eliminating "lost-in-the-middle" hallucinations.
+    *   **Hybrid Context Window**: To prevent "context blindness" in 7B models, Foreman automatically extracts the top 30 lines (imports/interfaces) and stitches them with a focused 40-line window around the target block. This provides high-signal context without thousands of lines of noise.
+    *   **Strict Step Separation**: The Cloud Architect is explicitly instructed to never combine distant file edits into a single step, guaranteeing that the local model only processes bite-sized, isolated modifications.
+    *   **Aider-Style Block Replacement**: Instead of outputting the entire file, Foreman forces the model to use strict `<<<<` `====` `>>>>` SEARCH/REPLACE blocks.
     *   **Automated Inner Loop (Self-Healing)**: Foreman extracts project verification commands (e.g., `go build`, `npm run lint`) and runs them automatically in the background after every file edit. If a small model makes a syntax error, Foreman captures the compiler output and automatically feeds it back to the local model to self-correct (up to 3 retries) without requiring user intervention.
 *   **Inline Cloud Code Review**: A built-in code reviewer step runs `git diff` on the workspace and asks the cloud agent to review the changes. If it spots bugs, it dynamically injects correction tasks *directly into the active execution steps list* for the local model to run.
 *   **Automated Build, Lint & Test**: Automatically detects the type of project you are working on (Go, Node.js, Rust, Python, etc.) and runs the corresponding compile, lint, and test suites as the final verification step.
