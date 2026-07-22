@@ -437,9 +437,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m.startStepExecution(step)
 					}
 				case "q":
-					m.state = screenReview
-					m.autoExecute = false
-					m.isExecuting = false
+					if !m.isExecuting {
+						m.state = screenReview
+						m.autoExecute = false
+						m.isExecuting = false
+					}
 				}
 			}
 
