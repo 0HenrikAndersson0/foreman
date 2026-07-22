@@ -917,9 +917,15 @@ func (m Model) startPlanning(prompt string, isContinue bool, isRefinement bool) 
 	m.agyRunner = newAGYRunner()
 	m.spinnerTickCount = 0
 	m.quoteIndex = 0
-	m.statusMsg = aiQuotes[m.quoteIndex]
 
 	cloudAgentName := m.cloudAgents[m.selectedCloudAgent]
+	if isRefinement {
+		m.statusMsg = fmt.Sprintf("Refining plan with %s based on feedback...", cloudAgentName)
+	} else if isContinue {
+		m.statusMsg = fmt.Sprintf("Running %s in continue mode for the new task...", cloudAgentName)
+	} else {
+		m.statusMsg = fmt.Sprintf("Running %s to analyze the workspace and create the plan...", cloudAgentName)
+	}
 
 	go func() {
 		var plan string
