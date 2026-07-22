@@ -161,6 +161,20 @@ type Model struct {
 	selectedCloudAgent    int
 	showDetailedBlueprint bool
 	codeReviewLoopCount   int
+	spinnerTickCount      int
+	quoteIndex            int
+}
+
+var aiQuotes = []string{
+	"Releasing the robots...",
+	"Connecting to skynet...",
+	"Brewing digital coffee...",
+	"Compiling the matrix...",
+	"Waking up the cloud architects...",
+	"Consulting the silicon oracle...",
+	"Reticulating splines...",
+	"Generating 10x code...",
+	"Unleashing the algorithms...",
 }
 
 func InitialModel(cwd string) Model {
@@ -626,6 +640,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg
 
 	default:
+		switch msg.(type) {
+		case spinner.TickMsg:
+			if m.state == screenPlanning {
+				m.spinnerTickCount++
+				if m.spinnerTickCount%20 == 0 {
+					m.quoteIndex = (m.quoteIndex + 1) % len(aiQuotes)
+					m.statusMsg = aiQuotes[m.quoteIndex]
+				}
+			}
+		}
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 	}
@@ -890,15 +914,11 @@ func (m Model) startPlanning(prompt string, isContinue bool, isRefinement bool) 
 	m.state = screenPlanning
 	m.streamingLog = ""
 	m.agyRunner = newAGYRunner()
+	m.spinnerTickCount = 0
+	m.quoteIndex = 0
+	m.statusMsg = aiQuotes[m.quoteIndex]
 
 	cloudAgentName := m.cloudAgents[m.selectedCloudAgent]
-	if isRefinement {
-		m.statusMsg = fmt.Sprintf("Refining plan with %s based on feedback...", cloudAgentName)
-	} else if isContinue {
-		m.statusMsg = fmt.Sprintf("Running %s in continue mode for the new task...", cloudAgentName)
-	} else {
-		m.statusMsg = fmt.Sprintf("Running %s to analyze the workspace and create the plan...", cloudAgentName)
-	}
 
 	go func() {
 		var plan string
